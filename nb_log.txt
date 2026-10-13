@@ -1,0 +1,14 @@
+  CXX engine/src/amg.cpp
+  CXX engine/src/case.cpp
+  CXX engine/src/deck.cpp
+  CXX engine/src/deck_parser.cpp
+  CXX engine/src/examples.cpp
+  CXX engine/src/fluid.cpp
+  CXX engine/src/grid.cpp
+  CXX engine/src/io.cpp
+  CXX engine/src/linsolve.cpp
+  CXX engine/src/simulator.cpp
+  CXX engine/src/streamline.cpp
+  CXX engine/src/study.cpp
+  CXX engine/src/tools.cpp
+NB OK

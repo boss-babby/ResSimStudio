@@ -1,0 +1,25 @@
+// ResSim Studio resources (compiled by windres in build_mingw.sh, by rc.exe in the CMake/MSVC build)
+1   ICON   "ressim.ico"
+101 RCDATA "keyword_docs.txt"
+102 RCDATA "icons.ttf"
+
+1 VERSIONINFO
+FILEVERSION 1,4,0,0
+PRODUCTVERSION 1,4,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "ResSim"
+      VALUE "FileDescription", "ResSim Studio - reservoir simulation"
+      VALUE "FileVersion", "1.4.0"
+      VALUE "ProductName", "ResSim Studio"
+      VALUE "ProductVersion", "1.4.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
