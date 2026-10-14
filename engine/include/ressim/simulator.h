@@ -6,6 +6,7 @@
 #include "ressim/fluid.h"
 #include "ressim/grid.h"
 #include "ressim/linsolve.h"
+#include "ressim/blocksolve.h"
 #include <vector>
 #include <string>
 #include <functional>
@@ -54,7 +55,7 @@ struct InPlace { double oil = 0, water = 0, gasFree = 0, gasDissolved = 0, oilVa
 
 struct AquiferState { int id = 0; bool fetkovich = true; int cells = 0; double pressure = 0, rate = 0, cumulative = 0; };
 
-struct RunStats { int timesteps = 0, cuts = 0, newton = 0, linear = 0; double seconds = 0; bool cpr = false; int amgLevels = 0; int polyOuter = 0; };
+struct RunStats { int timesteps = 0, cuts = 0, newton = 0, linear = 0; double seconds = 0; double asmSec = 0, linSec = 0; bool cpr = false; int amgLevels = 0; int polyOuter = 0; };
 
 class Simulator {
 public:
@@ -224,6 +225,9 @@ private:
     CSR J_;
     ILU0 ilu_;
     CPR cpr_;
+    BlockSolver bsolver_;
+    int cprSticky_ = 0;
+    std::vector<int> swBack_; // BHP -> rate switches of each well in the current time step // solves left that go straight to CPR (block ILU failed recently)
     bool useCPR_ = false;
     std::vector<double> accD_;
     std::vector<double> pcScale_;

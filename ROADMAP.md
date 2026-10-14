@@ -122,6 +122,22 @@ Next robustness items: Appleyard chopping and dS/dP-based time-step control (D24
 
 **What is still open in Phases A–D (honest list):** groups with guide-rate allocation (B12), VFP/THP (B13), MSW (B14), WECON/WTEST/ACTIONX/UDQ (B15/B16) and tracers (B17) are run by OPM/ECLIPSE through pass-through, but not by the own engine. Also open: the binary output writer (C18), RESTART (C19), EDITNNC/PINCHREG, AQUTAB/numerical aquifers, hysteresis, block-CSR/AVX2 assembly, AMG reuse, and the GPU backend. These are multi-week items each and were not finished in this round.
 
+## Status after the solver / Norne round (October 2026)
+
+| Item | Result |
+|---|---|
+| **Norne in the own engine** | Before this round, Norne got stuck in the first Newton solves: the linear solver never converged. The root cause was the old CPR pressure stage, a single plain-aggregation AMG V-cycle with 1 Gauss-Seidel sweep. Inside CPR it was *worse* than ILU alone: 300 BiCGStab its, 10.1 s, relres 1.8e-2, not converged on the dumped Norne Jacobian (133 329 unknowns, 2.86 M nonzeros). Norne now runs: NORNE_RESULT |
+| New block linear solver (`BlockSolver`) | 3×3 block-CSR storage. Wells are eliminated by a Schur complement and folded into the cell blocks. Block ILU(0) is exact in 3×3 blocks. The CPR pressure stage is true-IMPES (wells optional) with aggregation AMG (2 smoothing sweeps, minimal-residual over-correction), run as an inner AMG-BiCGStab (8 its, 1e-2) inside an outer flexible GMRES. Same Norne Jacobian: **5 iterations, 0.42 s** (CPR) or 21 its / 0.19 s (block ILU only), versus 300 its / 10 s and no convergence before. Automatic mode tries block ILU first and switches to CPR for the next 8 solves when it fails. Inexact Newton accepts a step whose relres is below 0.5. |
+| Nonlinear robustness | Added OPM-style oscillation/stagnation detection with update relaxation (ω down to 0.5). Time-step control is now change-based (Aziz–Settari: target ΔS = DSMAX, Δp/p = 0.2, combined with the Newton-count rule). Well BHP↔rate switching has hysteresis: a 0.1 % margin and at most one return to rate control per well per step. Norne well D-2H used to ping-pong RESV↔BHP and burn re-solves; report step 28 is now reached in 2.7 min instead of 10 min. |
+| AD framework | Forward-mode `AD<N>` now has a complete math library: AD^AD `pow`, abs/min/max, `smoothMax` (C∞, keeps Newton quadratic at switches), tanh/sin/cos/atan/cbrt, and comparisons. New runtime-sized `ADV` (up to 12 derivatives, no heap) is for compositional (nc components) and thermal (+T) unknowns. It is the base for the coming hysteresis / compositional / thermal / geomechanics modules. |
+| GPU solver | New `BlockAccelerator` interface in the engine. The app implements it with **Direct3D 11 compute shaders**: block-CSR SpMV, vector updates and a two-stage dot reduction. The system is block-Jacobi scaled in double on the CPU, and the GPU runs a single-precision BiCGStab as the preconditioner of the double-precision CPU FGMRES (mixed-precision iterative refinement). Run > Tuning > Linear solver > GPU. If no D3D11 device exists or the solve fails, it falls back to CPR. On the Norne Jacobian under Wine (emulated device): 35 outer its, relres 9.8e-5, converged. Only one simulation thread uses the device at a time; parallel study runs use the CPU. |
+| Binary output (C18, part 1) | The own engine writes ECLIPSE **SMSPEC/UNSMRY** (`ecl::writeSummary`), which ResInsight, OPM tools and resdata read. A round-trip test is included. EGRID/INIT/UNRST writers are still open. |
+| ECLIPSE example decks | Decks that the strict importer rejects now open leniently: grid and wells are shown and editable, with defaults for missing tables. They are marked *external-only*: OPM Flow / ECLIPSE run the original deck unchanged, and the own engine refuses them with the reason. Editor checker: keyword-line detection fixed, so ECLIPSE example files (BRILLIG, ALKALINE_ASP, …) no longer show false errors. |
+| UI | Tab close (×) buttons were invisible at UI sizes below 100 % (ImGui computed a zero line thickness). Patched. |
+| Tests | 144 native checks pass. New: lenient import / external-only, block solver in all modes, AD pow/ADV derivatives, summary writer round-trip. |
+
+**Still open (honest):** groups with guide rates (B12), VFP/THP (B13), MSW (B14), WECON/WTEST/ACTIONX/UDQ (B15/B16), tracers (B17), EGRID/INIT/UNRST writers and RESTART (C18/C19), EDITNNC/PINCHREG, AQUTAB, hysteresis (the AD/framework groundwork is in place), and AMG setup reuse across Newton iterations. OPM Flow and ECLIPSE run all of these through pass-through.
+
 ## Industry-grade gap audit (living list, updated every round)
 
 Legend: ✅ done · 🟡 partial · ❌ missing. "Own" is the ResSim engine. "OPM GUI" means the case can be built and edited in the app and run by OPM Flow.
@@ -149,10 +165,10 @@ Legend: ✅ done · 🟡 partial · ❌ missing. "Own" is the ResSim engine. "OP
 | Unknown / unsupported keywords | ignored by the own engine (listed in the log) | ✅ kept, editable, written back in order; unedited imports run the original deck (pass-through) | — |
 | Streamlines | ✅ own TOF tracer (Pollock) | ✅ ECLIPSE FrontSim engine option; viewer uses simulator FLR* fluxes | streamline-based saturation transport in the own engine |
 | Schema-driven keyword forms (all OPM keywords) | n/a | ✅ forms for record keywords and tables (Deck Editor, Advanced page) | forms for array keywords (box editor) |
-| Binary output (EGRID/INIT/UNRST/SMSPEC) | 🟡 reads them; writes its own .rsim | ✅ via OPM | writer for the own engine (C18) |
+| Binary output (EGRID/INIT/UNRST/SMSPEC) | 🟡 reads all; writes SMSPEC/UNSMRY | ✅ via OPM | EGRID/INIT/UNRST writers (C18) |
 | Restart (RESTART, SAVE) | ❌ | ❌ | C19 |
-| Time-step control (dS/dP targets), Appleyard chopping | 🟡 Appleyard-style dS/dp chopping per Newton update, Newton-count-based step growth/cut; no dS/dP target control yet | n/a | target-change step control, well Schur complement (D24) |
-| Linear solver (CPR true-IMPES + AMG, ILU0) | ✅ | n/a | AMG reuse, block-CSR (D22/D23) |
+| Time-step control (dS/dP targets), Appleyard chopping | ✅ Appleyard chopping, change-based (ΔS/Δp target) + Newton-count step control, oscillation relaxation, well-switch hysteresis | n/a | PID controller with error estimate |
+| Linear solver (block CSR, Schur-folded wells, block ILU0, CPR true-IMPES + AMG-Krylov, FGMRES, GPU D3D11) | ✅ | n/a | AMG setup reuse, level-scheduled ILU |
 | Million-cell performance | 🟡 100k cells works, slowly | ✅ via OPM | Phase D |
 
 **Gridding decision:** corner-point + NNC (what ECLIPSE/OPM/Petrel use) stays the standard. Still to add: PINCH/MINPV pinch-out NNCs and EDITNNC (A6), then CARFIN/LGR (Phase E). PEBI/unstructured grids are not needed for ECLIPSE-class work and are not planned.

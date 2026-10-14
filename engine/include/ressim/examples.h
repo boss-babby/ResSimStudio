@@ -25,5 +25,7 @@ std::vector<ExampleInfo> listExamples();
 // Builds the example. Throws std::runtime_error for an unknown id. The history-matching exercise runs its hidden
 // "truth" model once to create the observed data (a few seconds).
 Case makeExample(const std::string& id);
+// SPE1 black-oil PVT + generic sandstone SWOF/SGOF (FIELD or METRIC): defaults for decks imported leniently.
+void defaultBlackOil(Case& c, bool metric);
 
 } // namespace ressim

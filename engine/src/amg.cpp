@@ -293,14 +293,29 @@ void AMG::cycle(int l) const {
         return;
     }
     std::fill(L.x.begin(), L.x.end(), 0.0);
-    gaussSeidel(L.A, L.b.data(), L.x.data(), true);
+    for (int s = 0; s < sweeps; ++s) gaussSeidel(L.A, L.b.data(), L.x.data(), true);
     L.A.spmv(L.x.data(), L.r.data());
     for (int i = 0; i < n; ++i) L.r[i] = L.b[i] - L.r[i];
     const Level& C = lv_[l + 1];
     spmvRect(L.rRow, L.rCol, L.rVal, L.nc, L.r.data(), C.b.data(), false);
     cycle(l + 1);
-    spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.x.data(), true);
-    gaussSeidel(L.A, L.b.data(), L.x.data(), false);
+    if (overCorrect) {
+        // e = P x_c; x += alpha e with alpha minimising |r - alpha A e| (plain aggregation under-corrects)
+        L.e.resize(size_t(n));
+        L.ae.resize(size_t(n));
+        spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.e.data(), false);
+        L.A.spmv(L.e.data(), L.ae.data());
+        double num = 0, den = 0;
+        for (int i = 0; i < n; ++i) {
+            num += L.ae[size_t(i)] * L.r[size_t(i)];
+            den += L.ae[size_t(i)] * L.ae[size_t(i)];
+        }
+        double alpha = den > 0 ? num / den : 1.0;
+        if (!std::isfinite(alpha)) alpha = 1.0;
+        alpha = std::min(3.0, std::max(0.3, alpha));
+        for (int i = 0; i < n; ++i) L.x[size_t(i)] += alpha * L.e[size_t(i)];
+    } else spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.x.data(), true);
+    for (int s = 0; s < sweeps; ++s) gaussSeidel(L.A, L.b.data(), L.x.data(), false);
 }
 
 void AMG::apply(const double* r, double* z) const {

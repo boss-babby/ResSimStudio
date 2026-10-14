@@ -8,6 +8,7 @@
 #include "backends/imgui_impl_dx11.h"
 #include <shellapi.h>
 #include <objbase.h>
+#include "gpu_solver.h"
 #include <string>
 
 Gfx g_gfx;
@@ -110,6 +111,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmdLine, int) {
     // the common file dialogs (shell namespace) expect a single-threaded COM apartment on the UI thread
     const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     ImGui_ImplWin32_EnableDpiAwareness();
+    registerGpuSolver();
     WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInst, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
                       L"ResSimStudio", nullptr};
     wc.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(1));

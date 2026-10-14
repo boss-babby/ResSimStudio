@@ -21,6 +21,8 @@ static std::string fmt(const char* f, double a = 0, double b = 0, double c = 0, 
 
 // ======================================================================== setup
 void Simulator::setup(const Case& c) {
+    if (!c.externalOnly.empty())
+        throw std::runtime_error("The ResSim engine cannot run this deck (" + c.externalOnly + "). Run it with OPM Flow or ECLIPSE.");
     const std::string err = validateCase(c);
     if (!err.empty()) throw std::runtime_error(err);
     case_ = c;
@@ -384,7 +386,9 @@ static double targetOf(const WellControl& c, Control m) {
 
 bool Simulator::checkWellSwitching() {
     bool sw = false;
-    for (auto& w : wells_) {
+    if (swBack_.size() != wells_.size()) swBack_.assign(wells_.size(), 0);
+    for (size_t wi = 0; wi < wells_.size(); ++wi) {
+        auto& w = wells_[wi];
         if (!w.open) continue;
         const bool prod = w.type == WellType::Producer;
         const double lim = w.ctrl.bhp > 0 ? w.ctrl.bhp : (prod ? U_.atm : 1e12);
@@ -878,6 +882,8 @@ void Simulator::updateState(const std::vector<double>& dx) {
 }
 
 bool Simulator::newton(double dt, int& its, int& lin) {
+    std::vector<double> cnvHist;
+    double omega = 1.0;
     const Tuning& T = case_.tuning;
     std::vector<double> rhs(J_.n), dx;
     lin = 0;
@@ -926,33 +932,110 @@ bool Simulator::newton(double dt, int& its, int& lin) {
             }
             std::fprintf(stderr, "    matrix n=%d zeroRows=%d tinyDiag=%d nonFinite=%d diag range %.3e..%.3e\n", J_.n, zeroRow, zeroDiag, nonFinite, mind, maxd);
         }
-        const Preconditioner* M = &ilu_;
-        if (useCPR_) {
-            const double* acc = nullptr;
-            if (case_.tuning.cprWeights == 1) {
-                const int na = grid_.numActive(), nv = nv_;
-                accD_.assign(size_t(na) * nv * nv, 0.0);
-                const bool ph[3] = {W_, O_, G_};
-                // same per-cell row scaling as the assembled system (dt / PV; the constant dt does not matter)
-                for (int a = 0; a < na; ++a) {
-                    const double sc = 1.0 / grid_.poreVolRef[a];
-                    for (int p = 0; p < 3; ++p) if (ph[p])
-                        for (int k = 0; k < nv; ++k) accD_[(size_t(a) * nv + eq_[p]) * nv + k] = cf_[a].acc[p].d[k] * sc;
-                }
-                acc = accD_.data();
+        // true-IMPES weights: accumulation derivatives with the same per-cell row scaling as the system
+        const double* acc = nullptr;
+        if (case_.tuning.cprWeights == 1) {
+            const int na = grid_.numActive(), nv = nv_;
+            accD_.assign(size_t(na) * nv * nv, 0.0);
+            const bool ph[3] = {W_, O_, G_};
+            for (int a = 0; a < na; ++a) {
+                const double sc = 1.0 / grid_.poreVolRef[a];
+                for (int p = 0; p < 3; ++p)
+                    if (ph[p])
+                        for (int k = 0; k < nv; ++k)
+                            accD_[(size_t(a) * nv + eq_[p]) * nv + k] = cf_[a].acc[p].d[k] * sc;
             }
-            cpr_.setup(J_, grid_.numActive(), nv_, int(wells_.size()), acc);
-            M = &cpr_; stats_.amgLevels = cpr_.amg().levels();
+            acc = accD_.data();
         }
-        else ilu_.factor(J_);
-        LinResult lr = bicgstab(J_, *M, rhs, dx, T.linTol, T.maxLinear);
-        lin += lr.iterations;
-        if (!lr.converged) {
-            LinResult lg = gmres(J_, *M, rhs, dx, T.linTol, T.maxLinear, 40);
-            lin += lg.iterations;
-            if (!lg.converged && lg.relResidual > 1e-2) { log_(fmt("  linear solver failed (res %.2e)", lg.relResidual)); return false; }
+        if (const char* dp = std::getenv("RESSIM_DUMP")) {
+        // linear-system dump for tools/lsbench
+        static int dumped = 0;
+        if (dumped++ == std::atoi(std::getenv("RESSIM_DUMP_AT") ? std::getenv("RESSIM_DUMP_AT") : "0")) {
+            if (FILE* f = std::fopen(dp, "wb")) {
+                const int na = grid_.numActive(), nw = int(wells_.size()), nnz = int(J_.val.size());
+                int hdr[5] = {J_.n, nnz, na, nv_, nw};
+                std::fwrite(hdr, sizeof(int), 5, f);
+                std::fwrite(J_.rowPtr.data(), sizeof(int), size_t(J_.n) + 1, f);
+                std::fwrite(J_.col.data(), sizeof(int), size_t(nnz), f);
+                std::fwrite(J_.val.data(), sizeof(double), size_t(nnz), f);
+                std::fwrite(rhs.data(), sizeof(double), size_t(J_.n), f);
+                const int hasAcc = accD_.size() == size_t(na) * nv_ * nv_ ? 1 : 0;
+                std::fwrite(&hasAcc, sizeof(int), 1, f);
+                if (hasAcc) std::fwrite(accD_.data(), sizeof(double), accD_.size(), f);
+                std::fclose(f);
+                log_(" linear system dumped to " + std::string(dp));
+            }
+        }
+    }
+    const auto tLin = std::chrono::steady_clock::now();
+        struct LinTimer { RunStats& s; std::chrono::steady_clock::time_point t; ~LinTimer() { s.linSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); } } linTimer{stats_, tLin};
+        // block solver: block-ILU(0) BiCGStab first (cheap; enough for most steps), CPR-AMG + flexible GMRES when it
+        // fails (or always, for the CPR setting). A reduced but not converged residual is an inexact Newton step.
+        {
+            const int na = grid_.numActive(), nw = int(wells_.size());
+            const int mode = case_.tuning.linearSolver; // 0 ILU, 1 CPR, 2 auto
+            BlockSolverOptions bo;
+            bo.tol = T.linTol;
+            bo.maxIt = std::min(T.maxLinear, 200);
+            BlockSolverStats st;
+            bool useCpr = mode == 1 || (mode == 2 && cprSticky_ > 0);
+            bool tried = false;
+            if (mode == 3 && blockAccelerator()) {
+                // GPU: device preconditioner + CPU flexible GMRES
+                bo.accelerator = true;
+                bo.cpr = false;
+                bo.maxIt = std::min(T.maxLinear, 100);
+                st = bsolver_.solve(J_, na, nv_, nw, acc, rhs, dx, bo);
+                lin += st.iterations;
+                tried = true;
+                bo.accelerator = false;
+                useCpr = !st.converged;
+            }
+            if (!useCpr && !tried) {
+                bo.cpr = false;
+                bo.maxIt = mode == 0 ? bo.maxIt : 40;
+                st = bsolver_.solve(J_, na, nv_, nw, acc, rhs, dx, bo);
+                lin += st.iterations;
+                if (!st.converged && mode == 2) {
+                    useCpr = true;
+                    cprSticky_ = 8;
+                }
+            } else if (cprSticky_ > 0) --cprSticky_;
+
+            if (useCpr) {
+                bo.cpr = true;
+                bo.maxIt = std::min(T.maxLinear, 150);
+                std::vector<double> dxi;
+                BlockSolverStats s2 = bsolver_.solve(J_, na, nv_, nw, acc, rhs, dxi, bo);
+                lin += s2.iterations;
+                stats_.amgLevels = s2.amgLevels;
+                if (s2.converged || !st.iterations || s2.relResidual < st.relResidual) {
+                    st = s2;
+                    dx.swap(dxi);
+                }
+            }
+            if (!st.converged) {
+                if (!(st.relResidual < 0.5)) {
+                    log_(fmt("  linear solver failed (res %.2e)", st.relResidual));
+                    return false;
+                }
+                if (std::getenv("RESSIM_DEBUG"))
+                    std::fprintf(stderr, " inexact Newton step (linear res %.2e)\n", st.relResidual);
+            }
         }
         for (double v : dx) if (!std::isfinite(v)) { log_("  non-finite Newton update"); return false; }
+        // oscillation / stagnation detection (OPM-style): relax the update when the residual oscillates
+        cnvHist.push_back(cnv);
+        if (cnvHist.size() >= 3) {
+            const size_t k = cnvHist.size() - 1;
+            const bool osc = cnvHist[k] > 0.99 * cnvHist[k - 1] && cnvHist[k - 1] < 0.99 * cnvHist[k - 2];
+            const bool stag = cnvHist[k] > 0.95 * cnvHist[k - 1] && cnvHist[k - 1] > 0.95 * cnvHist[k - 2];
+            if (osc || stag) {
+                omega = std::max(0.5, omega - 0.1);
+                if (std::getenv("RESSIM_DEBUG")) std::fprintf(stderr, " %s detected - relaxation %.1f\n", osc ? "oscillation" : "stagnation", omega);
+            }
+        }
+        if (omega < 1.0) for (double& v : dx) v *= omega;
         updateState(dx);
         // rate-controlled wells whose BHP crosses the limit switch to BHP control inside the Newton loop
         // (otherwise a target that cannot be met makes Newton stall and the step is cut forever)
@@ -1212,6 +1295,20 @@ bool Simulator::runReportStep() {
         record(dt, totIts, totLin);
         double next = dt;
         if (its <= 5) next = dt * T.growth; else if (its > 9) next = dt * 0.6;
+        {
+            // change-based control (Aziz & Settari): dt_new = dt * min_i (1 + w) eta_i / (du_i + w eta_i)
+            const int na = grid_.numActive();
+            double dS = 0, dP = 0;
+            for (int a = 0; a < na; ++a) {
+                dS = std::max(dS, std::fabs(sw_[size_t(a)] - s0[size_t(a)]));
+                if (hasGas_[size_t(a)] == 1 && h0[size_t(a)] == 1)
+                    dS = std::max(dS, std::fabs(x_[size_t(a)] - x0[size_t(a)]));
+                dP = std::max(dP, std::fabs(p_[size_t(a)] - p0[size_t(a)]) / std::max(p0[size_t(a)], 10.0 * U_.atm));
+            }
+            const double w = 0.5, etaS = T.dsMax, etaP = 0.2;
+            const double fS = (1 + w) * etaS / (dS + w * etaS), fP = (1 + w) * etaP / (dP + w * etaP);
+            next = std::min(next, dt * std::max(0.3, std::min(fS, fP)));
+        }
         if (clipped) next = std::max(next, dtNext_);
         dtNext_ = std::min(next, T.maxDt);
     }

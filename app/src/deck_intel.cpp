@@ -270,7 +270,11 @@ bool keywordLine(const std::string& line, std::string* name) {
     if (j > 8) return false;
     size_t k = j;
     while (k < line.size() && (line[k] == ' ' || line[k] == '\t' || line[k] == '\r')) ++k;
-    if (k < line.size() && !(line[k] == '-' && k + 1 < line.size() && line[k + 1] == '-')) return false;
+    if (k < line.size() && !(line[k] == '-' && k + 1 < line.size() && line[k + 1] == '-')) {
+        // ECLIPSE ignores text after a keyword: same rule as the engine parser - accepted for section headers
+        // ("PROPS =========") and for decorations that start with '='; otherwise the line is data
+        if (j == 0 || k == j || !(line[k] == '=' || isSectionName(upper(line.substr(0, j))))) return false;
+    }
     if (name) *name = line.substr(0, j);
     return true;
 }

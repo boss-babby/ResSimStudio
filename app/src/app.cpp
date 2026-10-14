@@ -727,7 +727,11 @@ void App::computeInit() {
 
 void App::runSimulation() {
     if (runner_.running()) return;
-    const std::string& v = validation();
+    if (!case_.externalOnly.empty() && settings_.engine == 0) {
+        notify("The ResSim engine cannot run this deck (" + case_.externalOnly.substr(0, 160) + ") - choose OPM Flow or ECLIPSE as the engine (toolbar engine box); they run the original deck unchanged");
+        return;
+    }
+    const std::string& v = case_.externalOnly.empty() ? validation() : std::string();
     if (!v.empty()) {
         for (int s = 0; s < int(Section::Count); ++s) if (!sectionStatus(Section(s)).empty()) { section_ = Section(s); break; }
         notify("Cannot run: " + v);
@@ -779,6 +783,14 @@ void App::runSimulation() {
 
 // Imported deck not edited since the import: the external engine runs the original file (with its INCLUDEs) unchanged.
 void App::applySourceDeck(OpmOptions& o) {
+    if (!case_.externalOnly.empty() && !srcDeck_.empty()) {
+        // the model only holds display defaults: the original deck is always the one that runs
+        if (caseVersion_ != srcDeckVersion_)
+            runner_.addLog("NOTE: this deck can only run unchanged (ResSim could not convert it) - model edits are not used; "
+                           "edit the deck text in the Deck Editor instead.");
+        o.sourceDeck = srcDeck_;
+        return;
+    }
     if (srcDeck_.empty() || settings_.deckRunMode != 0) return;
     if (caseVersion_ == srcDeckVersion_) { o.sourceDeck = srcDeck_; return; }
     runner_.addLog("NOTE: the imported deck was edited in ResSim - running the deck generated from the model. The original is "
@@ -1046,7 +1058,10 @@ void App::importDeck(const std::string& path) {
         char b[160];
         std::snprintf(b, sizeof(b), "Imported %s: %dx%dx%d%s, %d wells, %d report steps, %d warnings", baseName(path).c_str(), case_.grid.nx, case_.grid.ny,
                       case_.grid.nz, case_.grid.cornerPoint() ? " corner-point" : "", int(case_.wells.size()), int(case_.schedule.size()), int(warnings.size()));
-        notify(v.empty() ? std::string(b) : std::string(b) + " - problems: " + v);
+        if (!case_.externalOnly.empty()) {
+        notify(std::string(b) + " - external engines only: the ResSim engine cannot model this deck (see the import report)");
+        runner_.addLog("NOTE: ResSim cannot run this deck: " + case_.externalOnly + ". OPM Flow / ECLIPSE run the original file.");
+    } else notify(v.empty() ? std::string(b) : std::string(b) + " - problems: " + v);
         if (!warnings.empty()) { showDeckTools_ = true; deckTab_ = 0; deckTabSet_ = true; }
     } catch (const std::exception& e) {
         MessageBoxA(g_gfx.hwnd, e.what(), "ECLIPSE deck import failed", MB_OK | MB_ICONERROR);

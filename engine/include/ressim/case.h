@@ -346,6 +346,9 @@ const char* toString(DeckSection s);
 struct Case {
     std::string title = "Untitled";
     UnitSystem units = UnitSystem::Field;
+    // non-empty: the deck uses features the ResSim engine cannot model (why). The case was imported leniently
+    // (defaults filled in for display); it can only be run by OPM Flow / ECLIPSE on the original deck.
+    std::string externalOnly;
     Phases phases;
     GridInput grid;
     PropsInput props;

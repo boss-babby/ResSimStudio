@@ -4,6 +4,7 @@
 #include "ressim/grid.h"
 #include "ressim/simulator.h"
 #include "ressim/deck_parser.h"
+#include "ressim/examples.h"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -294,6 +295,17 @@ struct Importer {
         Group& g = it->second;
         ++g.count;
         if (!item.empty() && std::find(g.items.begin(), g.items.end(), item) == g.items.end()) g.items.push_back(item);
+    }
+    // lenient import (second pass after a strict failure): problems become warnings, defaults are filled in and
+    // the case is marked external-only (OPM Flow / ECLIPSE run the original deck)
+    bool lenient = false;
+    std::vector<std::string> extReasons;
+    bool need(bool ok, const std::string& text) {
+        if (ok) return true;
+        if (!lenient) throw std::runtime_error(text);
+        extReasons.push_back(text);
+        msg(1, text + " - default used for display (ResSim cannot run this deck)");
+        return false;
     }
     [[noreturn]] void fail(const std::string& text, int line = 0) const {
         throw std::runtime_error((K ? K->name : std::string("Deck")) + " (" + where(line) + "): " + text);
@@ -1299,6 +1311,12 @@ struct Importer {
                 if (!unsupported[kw].second) unsupported[kw].second = &k;
             } catch (const std::runtime_error& e) {
                 const std::string w = e.what();
+                if (lenient) {
+                    extReasons.push_back(w);
+                    msg(1, "could not be converted - skipped: " + w);
+                    keep(k, "could not be converted by ResSim");
+                    continue;
+                }
                 if (w.find(" (") != std::string::npos && w.compare(0, kw.size(), kw) == 0) throw;
                 fail(w);
             }
@@ -1379,11 +1397,12 @@ struct Importer {
     void finish() {
         K = nullptr;
         if (n == 0) throw std::runtime_error("Deck: DIMENS is missing");
-        if (!c.phases.oil && !c.phases.water) throw std::runtime_error("Deck: no OIL or WATER phase keyword in RUNSPEC");
+        if (!need(c.phases.oil || c.phases.water, "Deck: no OIL or WATER phase keyword in RUNSPEC")) c.phases.water = true;
         GridInput& g = c.grid;
 
         // ---- geometry
-        const bool cp = !g.zcorn.empty() || !g.coord.empty();
+        bool cp = !g.zcorn.empty() || !g.coord.empty();
+        const bool metricU = c.units == UnitSystem::Metric;
         auto has = [&](const char* name) { return arr.count(name) > 0; };
         auto take = [&](const char* name, std::vector<double>& dst) {
             usedArrays.insert(name);
@@ -1394,19 +1413,30 @@ struct Importer {
         auto undefined = [&](const std::vector<double>& v) { size_t m = 0; for (double x : v) if (std::isnan(x)) ++m; return m; };
         usedArrays.insert({"DX", "DY", "DZ", "TOPS"});
         if (cp) {
-            if (g.zcorn.empty() || g.coord.empty()) throw std::runtime_error("Deck: corner-point grids need both COORD and ZCORN");
+            if (!need(!g.zcorn.empty() && !g.coord.empty(), "Deck: corner-point grids need both COORD and ZCORN")) {
+                g.zcorn.clear();
+                g.coord.clear();
+                cp = false;
+            }
+        }
+        if (cp) {
             if (has("DX") || has("TOPS")) msg(0, "COORD/ZCORN given - DX/DY/DZ/TOPS ignored");
             g.dx.clear(); g.dy.clear(); g.dz.clear(); g.tops.clear();
         } else {
             for (const char* nm : {"DX", "DY", "DZ"}) {
                 std::vector<double>& dst = nm[1] == 'X' ? g.dx : nm[1] == 'Y' ? g.dy : g.dz;
-                if (!take(nm, dst)) throw std::runtime_error(std::string("Deck: ") + nm + " is missing (or COORD/ZCORN)");
-                if (undefined(dst)) throw std::runtime_error(std::string("Deck: ") + nm + " is not defined for every cell");
+                const double def = (nm[1] == 'Z' ? 10.0 : 100.0) * (metricU ? 0.3048 : 1.0);
+                if (!need(take(nm, dst), std::string("Deck: ") + nm + " is missing (or COORD/ZCORN)")) dst.assign(size_t(n), def);
+                if (!need(!undefined(dst), std::string("Deck: ") + nm + " is not defined for every cell"))
+                    for (double& x : dst) if (std::isnan(x)) x = def;
             }
             auto it = arr.find("TOPS");
-            if (it == arr.end()) throw std::runtime_error("Deck: TOPS is missing");
+            if (!need(it != arr.end(), "Deck: TOPS is missing")) it = arr.emplace("TOPS", std::vector<double>(size_t(n), 0.0)).first;
             std::vector<double>& t = it->second;
-            for (int q = 0; q < nl; ++q) if (std::isnan(t[size_t(q)])) throw std::runtime_error("Deck: TOPS is missing in the top layer");
+            bool topOk = true;
+            for (int q = 0; q < nl; ++q) if (std::isnan(t[size_t(q)])) topOk = false;
+            if (!need(topOk, "Deck: TOPS is missing in the top layer"))
+                for (int q = 0; q < nl; ++q) if (std::isnan(t[size_t(q)])) t[size_t(q)] = 0;
             bool onlyTop = true;
             for (int q = nl; q < n; ++q) if (!std::isnan(t[size_t(q)])) onlyTop = false;
             if (onlyTop) g.tops.assign(t.begin(), t.begin() + nl);
@@ -1418,8 +1448,12 @@ struct Importer {
 
         // ---- ACTNUM, PORO, PERM
         std::vector<double> act; take("ACTNUM", act);
-        if (!take("PORO", g.poro)) throw std::runtime_error("Deck: PORO is missing");
-        if (!take("PERMX", g.permx)) throw std::runtime_error("Deck: PERMX is missing");
+        if (!need(take("PORO", g.poro), "Deck: PORO is missing")) g.poro.assign(size_t(n), 0.2);
+        if (!need(take("PERMX", g.permx), "Deck: PERMX is missing")) g.permx.assign(size_t(n), 100.0);
+        if (lenient) {
+            for (double& x : g.poro) if (std::isnan(x)) x = 0.2;
+            for (double& x : g.permx) if (std::isnan(x)) x = 100.0;
+        }
         take("PERMY", g.permy); take("PERMZ", g.permz);
         if (g.permy.empty()) msg(0, "PERMY not given - PERMX is used");
         if (g.permz.empty()) msg(0, "PERMZ not given - PERMX is used");
@@ -1448,7 +1482,9 @@ struct Importer {
         take("SIGMAV", g.sigmav); take("LX", g.lx); take("LY", g.ly); take("LZ", g.lz); take("MULTMF", g.multmf);
         take("DZMTRXV", g.dzmtrxv);
         if (g.dual) {
-            if (g.nz % 2) throw std::runtime_error("Deck: DUALPORO/DUALPERM needs an even NZ (matrix layers + fracture layers)");
+            if (!need(g.nz % 2 == 0, "Deck: DUALPORO/DUALPERM needs an even NZ (matrix layers + fracture layers)")) g.dual = 0;
+        }
+        if (g.dual) {
             for (double& x : g.multmf) if (std::isnan(x)) x = 1.0;
             for (double& x : g.sigmav) if (std::isnan(x)) x = g.sigma;
             for (auto* v : {&g.lx, &g.ly, &g.lz, &g.dzmtrxv}) for (double& x : *v) if (std::isnan(x)) x = 0.0;
@@ -1503,7 +1539,10 @@ struct Importer {
                 if (dst[size_t(q)] < 1) dst[size_t(q)] = 1;
             }
             if (all1) { dst.clear(); return; }
-            if (nmax > 0 && mx > nmax)
+            if (nmax > 0 && mx > nmax && lenient) {
+                need(false, std::string("Deck: ") + name + " uses region " + std::to_string(mx) + " but only " + std::to_string(nmax) + " are defined");
+                for (int& x : dst) x = std::min(x, nmax);
+            } else if (nmax > 0 && mx > nmax)
                 throw std::runtime_error(std::string("Deck: ") + name + " uses region " + std::to_string(mx) + " but only " +
                                          std::to_string(nmax) + " " + what + " are defined");
         };
@@ -1536,9 +1575,19 @@ struct Importer {
         if (c.phases.vapoil && !(c.phases.oil && c.phases.gas)) { c.phases.vapoil = false; msg(1, "VAPOIL needs OIL and GAS - ignored"); }
         if (c.phases.vapoil && pvt[0].pvtg.empty()) { c.phases.vapoil = false; msg(1, "VAPOIL without PVTG - dry gas (PVDG) is used"); }
         if (!c.phases.vapoil && !pvt[0].pvtg.empty()) msg(1, "PVTG without VAPOIL - vaporised oil is off, the saturated gas FVF / viscosity are used");
+        Case defFluid; defaultBlackOil(defFluid, metricU);
         for (int t = 0; t < npvtUsed; ++t) {
             const size_t u = size_t(t);
             const std::string reg = npvtUsed > 1 ? " for PVT region " + std::to_string(t + 1) : "";
+            if (lenient) {
+                const PropsInput& D0 = defFluid.props;
+                if (!need(!(c.phases.oil && !c.phases.disgas && pvt[u].pvdo.empty()), "Deck: PVDO (or PVCDO) is missing" + reg))
+                    for (int i = 0; i < 10; ++i) pvt[u].pvdo.push_back({(14.7 + 1000.0 * i) * (metricU ? 0.0689475729 : 1.0), 1.2 * (1.0 - 1e-5 * 1000.0 * i), 1.0});
+                if (!need(!(c.phases.disgas && pvt[u].pvto.empty()), "Deck: PVTO is missing" + reg)) pvt[u].pvto = D0.pvto;
+                if (!need(!(c.phases.gas && pvt[u].pvdg.empty()), "Deck: PVDG (or PVTG) is missing" + reg)) pvt[u].pvdg = D0.pvdg;
+                if (!need(!(c.phases.vapoil && pvt[u].pvtg.size() < 2), "Deck: PVTG with at least 2 pressures is needed (VAPOIL)" + reg)) c.phases.vapoil = false;
+                if (pvt[u].density.oil <= 0) pvt[u].density = D0.density;
+            }
             if (c.phases.oil && !c.phases.disgas && pvt[u].pvdo.empty()) throw std::runtime_error("Deck: PVDO (or PVCDO) is missing" + reg);
             if (c.phases.disgas && pvt[u].pvto.empty()) throw std::runtime_error("Deck: PVTO is missing" + reg);
             if (c.phases.gas && pvt[u].pvdg.empty()) throw std::runtime_error("Deck: PVDG (or PVTG) is missing" + reg);
@@ -1553,6 +1602,10 @@ struct Importer {
         for (int t = 0; t < nsatUsed; ++t) {
             SatRegion R = satTables(t);
             const std::string reg = nsatUsed > 1 ? " for saturation region " + std::to_string(t + 1) : "";
+            if (lenient) {
+                if (!need(!(c.phases.water && c.phases.oil && R.swof.size() < 2), "Deck: SWOF (or SWFN + SOF3/SOF2) is missing" + reg)) R.swof = defFluid.props.swof;
+                if (!need(!(c.phases.gas && c.phases.oil && R.sgof.size() < 2), "Deck: SGOF (or SGFN/SLGOF) is missing" + reg)) R.sgof = defFluid.props.sgof;
+            }
             if (c.phases.water && c.phases.oil && R.swof.size() < 2) throw std::runtime_error("Deck: SWOF (or SWFN + SOF3/SOF2) is missing" + reg);
             if (c.phases.gas && c.phases.oil && R.sgof.size() < 2) throw std::runtime_error("Deck: SGOF (or SGFN/SLGOF) is missing" + reg);
             sats.push_back(R);
@@ -1607,7 +1660,12 @@ struct Importer {
             if (undefined(I.pressure)) {
                 size_t m = 0;
                 for (int q = 0; q < n; ++q) if (std::isnan(I.pressure[size_t(q)]) && (g.actnum.empty() || g.actnum[size_t(q)])) ++m;
-                if (m) throw std::runtime_error("Deck: PRESSURE is not defined for " + std::to_string(m) + " active cells");
+                if (m && !need(false, "Deck: PRESSURE is not defined for " + std::to_string(m) + " active cells")) {
+                    double pm = 0; int cn = 0;
+                    for (double x : I.pressure) if (!std::isnan(x)) { pm += x; ++cn; }
+                    pm = cn ? pm / cn : (metricU ? 200.0 : 3000.0);
+                    for (double& x : I.pressure) if (std::isnan(x)) x = pm;
+                }
                 for (double& x : I.pressure) if (std::isnan(x)) x = 0;
             }
             auto opt = [&](const char* name, std::vector<double>& dst, double def) {
@@ -1625,7 +1683,12 @@ struct Importer {
             for (int q = 0; q < n && cnt < 1; ++q) if (I.pressure[size_t(q)] > 0) { sp = I.pressure[size_t(q)]; sd = 0; ++cnt; }
             (void)sd; c.equil.datumPressure = sp;
         } else {
-            throw std::runtime_error("Deck: no initial conditions (EQUIL or PRESSURE/SWAT) in SOLUTION");
+            need(false, "Deck: no initial conditions (EQUIL or PRESSURE/SWAT) in SOLUTION");
+            double top = 1e300, bot = -1e300;
+            for (double x : g.tops) if (!std::isnan(x)) top = std::min(top, x);
+            if (top > 1e299) top = 0;
+            bot = top + 1000.0 * (metricU ? 0.3048 : 1.0);
+            c.equil.datumDepth = top; c.equil.datumPressure = metricU ? 200.0 : 3000.0; c.equil.owc = bot; c.equil.goc = top - 10;
         }
         if (arr.count("SWATINIT")) {
             usedArrays.insert("SWATINIT");
@@ -1709,7 +1772,9 @@ struct Importer {
             msg(1, "arrays not used by the simulator: " + list);
         }
 
-        if (c.schedule.empty()) throw std::runtime_error("Deck: SCHEDULE has no TSTEP or DATES");
+        if (!need(!c.schedule.empty(), "Deck: SCHEDULE has no TSTEP or DATES")) {
+            ReportStep st; st.length = 1; c.schedule.push_back(st);
+        }
         // a well has one type for the whole run: controls of the other type (e.g. a producer that is converted to
         // an injector later) are turned into shut-ins
         {
@@ -1771,10 +1836,31 @@ void deliver(const deck::RawDeck& D, std::vector<DeckMessage>& own, std::vector<
 
 Case importRaw(const deck::RawDeck& D, std::vector<std::string>* warnings, std::vector<DeckMessage>* report) {
     Importer im(D);
+    std::string strictError;
     try {
         im.run();
         im.finish();
-    } catch (const std::exception& e) {
+    } catch (const std::exception& e0) {
+        // second, lenient pass: any deck with a grid opens (for viewing, editing and external runs)
+        strictError = e0.what();
+        try {
+            Importer lz(D);
+            lz.lenient = true;
+            lz.run();
+            lz.finish();
+            if (lz.extReasons.empty()) lz.extReasons.push_back(strictError);
+            std::string why;
+            for (size_t i = 0; i < lz.extReasons.size() && i < 6; ++i) why += (i ? "; " : "") + lz.extReasons[i];
+            if (lz.extReasons.size() > 6) why += "; ... (" + std::to_string(lz.extReasons.size()) + " problems)";
+            lz.c.externalOnly = why;
+            DeckMessage m; m.level = 2; m.keyword = "Deck";
+            m.text = "the ResSim engine cannot run this deck (" + why + "). It was opened with defaults for display; "
+                     "OPM Flow / ECLIPSE run the original deck unchanged.";
+            lz.msgs.insert(lz.msgs.begin(), m);
+            deliver(D, lz.msgs, warnings, report);
+            return lz.c;
+        } catch (...) {}
+        const std::exception& e = e0;
         DeckMessage m; m.level = 2; m.keyword = "Deck"; m.text = e.what();
         im.msgs.push_back(m);
         deliver(D, im.msgs, nullptr, report);

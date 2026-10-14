@@ -88,6 +88,10 @@ struct Summary {
 };
 // smspec: path of the .SMSPEC/.FSMSPEC (data file(s) located automatically)
 bool readSummary(const std::string& smspec, Summary& s, std::string* err = nullptr);
+// Write ECLIPSE binary summary files BASE.SMSPEC + BASE.UNSMRY (big-endian Fortran records, the format read by
+// ResInsight, OPM tools, resdata/ecl2df). TIME is written first; report steps follow s.reportIndex.
+bool writeSummary(const Summary& s, const std::string& base, std::string* err = nullptr);
+
 // ResSim run -> same vector naming (FOPR, FWCT, WBHP:NAME, ...)
 Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<std::string>& wellNames, UnitSystem units);
 

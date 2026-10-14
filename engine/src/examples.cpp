@@ -752,4 +752,7 @@ Case makeExample(const std::string& id) {
     throw std::runtime_error("Unknown example '" + id + "'");
 }
 
+void defaultBlackOil(Case& c, bool metric) { spe1Fluids(c, metric); sandstoneScal(c); }
+
 } // namespace ressim
+

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -489,6 +490,125 @@ bool readSummary(const std::string& smspec, Summary& s, std::string* err) {
         const std::string u = upper(s.vars[size_t(pv)].unit);
         s.unitSystem = u == "PSIA" ? "FIELD" : u == "BARSA" ? "METRIC" : u == "ATMA" ? "LAB" : "";
     }
+    return true;
+}
+
+// ---------------------------------------------------------------- binary writer
+namespace {
+
+struct BinWriter {
+    std::ofstream f;
+    explicit BinWriter(const std::string& p) : f(p, std::ios::binary) {}
+
+    void u32(uint32_t v) {
+        const unsigned char b[4] = {uint8_t(v >> 24), uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v)};
+        f.write(reinterpret_cast<const char*>(b), 4);
+    }
+    void header(const std::string& name, int count, const char* type) {
+        char h[16];
+        std::memset(h, ' ', 16);
+        std::memcpy(h, name.data(), std::min<size_t>(8, name.size()));
+        const uint32_t c = uint32_t(count);
+        h[8] = char(c >> 24); h[9] = char(c >> 16); h[10] = char(c >> 8); h[11] = char(c);
+        std::memcpy(h + 12, type, 4);
+        u32(16); f.write(h, 16); u32(16);
+    }
+    void ints(const std::string& name, const std::vector<int>& v) {
+        header(name, int(v.size()), "INTE");
+        for (size_t s0 = 0; s0 < v.size(); s0 += 1000) {
+            const size_t n = std::min<size_t>(1000, v.size() - s0);
+            u32(uint32_t(4 * n));
+            for (size_t i = 0; i < n; ++i) u32(uint32_t(v[s0 + i]));
+            u32(uint32_t(4 * n));
+        }
+    }
+    void reals(const std::string& name, const std::vector<float>& v) {
+        header(name, int(v.size()), "REAL");
+        for (size_t s0 = 0; s0 < v.size(); s0 += 1000) {
+            const size_t n = std::min<size_t>(1000, v.size() - s0);
+            u32(uint32_t(4 * n));
+            for (size_t i = 0; i < n; ++i) {
+                uint32_t u; std::memcpy(&u, &v[s0 + i], 4);
+                u32(u);
+            }
+            u32(uint32_t(4 * n));
+        }
+    }
+    void chars(const std::string& name, const std::vector<std::string>& v) {
+        header(name, int(v.size()), "CHAR");
+        for (size_t s0 = 0; s0 < v.size(); s0 += 105) {
+            const size_t n = std::min<size_t>(105, v.size() - s0);
+            u32(uint32_t(8 * n));
+            for (size_t i = 0; i < n; ++i) {
+                char c[8]; std::memset(c, ' ', 8);
+                std::memcpy(c, v[s0 + i].data(), std::min<size_t>(8, v[s0 + i].size()));
+                f.write(c, 8);
+            }
+            u32(uint32_t(8 * n));
+        }
+    }
+};
+
+} // namespace
+
+bool writeSummary(const Summary& s, const std::string& base, std::string* err) {
+    const size_t nt = s.time.size();
+    std::vector<size_t> order; // TIME first
+    int tv = -1;
+    for (size_t i = 0; i < s.vars.size(); ++i)
+        if (s.vars[i].keyword == "TIME") { tv = int(i); break; }
+    if (tv >= 0) order.push_back(size_t(tv));
+    for (size_t i = 0; i < s.vars.size(); ++i)
+        if (int(i) != tv) order.push_back(i);
+    const size_t nv = order.size() + (tv < 0 ? 1 : 0);
+
+    {
+        BinWriter w(base + ".SMSPEC");
+        if (!w.f) { if (err) *err = "cannot write " + base + ".SMSPEC"; return false; }
+        const int unitId = s.unitSystem == "METRIC" ? 1 : s.unitSystem == "LAB" ? 3 : 2;
+        w.ints("INTEHEAD", {unitId, 100});
+        w.chars("RESTART", std::vector<std::string>(9, ""));
+        w.ints("DIMENS", {int(nv), s.nx, s.ny, s.nz, 0, -1});
+        std::vector<std::string> kw, wg, un;
+        std::vector<int> nums;
+        if (tv < 0) { kw.push_back("TIME"); wg.push_back(":+:+:+:+"); un.push_back("DAYS"); nums.push_back(0); }
+        for (size_t i : order) {
+            const SummaryVar& v = s.vars[i];
+            kw.push_back(v.keyword);
+            wg.push_back(v.wgname.empty() ? ":+:+:+:+" : v.wgname);
+            un.push_back(v.unit);
+            nums.push_back(v.num);
+        }
+        w.chars("KEYWORDS", kw);
+        w.chars("WGNAMES", wg);
+        w.ints("NUMS", nums);
+        w.chars("UNITS", un);
+        w.ints("STARTDAT", {s.startDay, s.startMonth, s.startYear, 0, 0, 0});
+        if (!w.f) { if (err) *err = "write error " + base + ".SMSPEC"; return false; }
+    }
+
+    BinWriter w(base + ".UNSMRY");
+    if (!w.f) { if (err) *err = "cannot write " + base + ".UNSMRY"; return false; }
+    size_t rep = 0;
+    bool newReport = true;
+    std::vector<float> row(nv);
+    for (size_t t = 0; t < nt; ++t) {
+        if (newReport) {
+            w.ints("SEQHDR", {int(rep)});
+            newReport = false;
+        }
+        w.ints("MINISTEP", {int(t)});
+        size_t k = 0;
+        if (tv < 0) row[k++] = float(s.time[t]);
+        for (size_t i : order)
+            row[k++] = t < s.values[i].size() ? s.values[i][t] : 0.0f;
+        w.reals("PARAMS", row);
+        while (rep < s.reportIndex.size() && s.reportIndex[rep] <= int(t)) {
+            ++rep;
+            newReport = true;
+        }
+    }
+    if (!w.f) { if (err) *err = "write error " + base + ".UNSMRY"; return false; }
     return true;
 }
 

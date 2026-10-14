@@ -1650,10 +1650,15 @@ void App::editNumerics() {
         ch |= ui::propD("Material balance tolerance", &t.mbTol, "%.3g");
         ch |= ui::propI("Max linear iterations", &t.maxLinear, 10, 5000);
         ch |= ui::propD("Linear relative tolerance", &t.linTol, "%.3g");
-        static const char* ls[] = {"ILU(0) - BiCGStab", "CPR-AMG (two-stage)", "Automatic (CPR for >= 500 cells)"};
-        ch |= ui::propCombo("Preconditioner", &t.linearSolver, ls, 3,
-                            "CPR: constrained pressure residual - algebraic multigrid on the pressure system, then ILU(0) on the full system. "
-                            "Linear iterations become nearly independent of grid size.");
+            static const char* ls[] = {"Block ILU(0) - BiCGStab", "CPR-AMG + block ILU(0) - FGMRES",
+                                "Automatic (block ILU, CPR when needed)", "GPU (D3D11 compute, mixed precision)"};
+    ch |= ui::propCombo("Linear solver", &t.linearSolver, ls, 4,
+                        "All options use 3x3 block storage with the wells folded in by a Schur complement.\n"
+                        "CPR: constrained pressure residual - true-IMPES pressure equation solved by aggregation AMG (over-corrected "
+                        "V-cycles inside BiCGStab), then block ILU(0) on the full system, inside flexible GMRES.\n"
+                        "Automatic: block ILU(0) first (cheapest), CPR for the next solves when it fails.\n"
+                        "GPU: block-Jacobi BiCGStab in single precision on the graphics card as the preconditioner of a double-"
+                        "precision FGMRES on the CPU; falls back to CPR when the device is unavailable or the solve fails.");
         static const char* cw[] = {"Quasi-IMPES", "True-IMPES"};
         ch |= ui::propCombo("CPR pressure weights", &t.cprWeights, cw, 2,
                             "How CPR forms the pressure equation. True-IMPES (default, as in OPM Flow) combines the mass balances with "

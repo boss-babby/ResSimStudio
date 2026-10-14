@@ -1104,9 +1104,99 @@ static void testDeckRepair() {
     check(props.find("\nFOPT") == std::string::npos && props.find("\nWOPR") == std::string::npos, "no summary vectors left in PROPS");
 }
 
+// ECLIPSE decks with features ResSim cannot model must still open (lenient pass) and be marked external-only
+static void testLenientImport() {
+    std::printf("Lenient import / external-only decks\n");
+    const std::string deck =
+        "RUNSPEC\nDIMENS\n 3 3 1 /\nOIL\nWATER\nFIELD\nGRID\nDX\n 9*100 /\nDY\n 9*100 /\nDZ\n 9*20 /\nTOPS\n 9*5000 /\n"
+        "PORO\n 9*0.2 /\nPERMX\n 9*100 /\nPERMY\n 9*100 /\nPERMZ\n 9*10 /\nPROPS\nDENSITY\n 50 62 0.06 /\nSOLUTION\n"
+        "PRESSURE\n 9*3000 /\nSWAT\n 9*0.2 /\nSCHEDULE\nTSTEP\n 10 /\nEND\n";
+    std::vector<std::string> warn;
+    bool opened = false, refused = false;
+    try {
+        const Case c = eclipseDeckFromString(deck, "", &warn);
+        opened = c.grid.nx == 3 && !c.externalOnly.empty();
+        try {
+            Simulator sim;
+            sim.setup(c);
+        } catch (const std::exception&) {
+            refused = true;
+        }
+    } catch (const std::exception& e) {
+        std::printf("  import threw: %s\n", e.what());
+    }
+    check(opened, "deck without PVT/SCAL tables opens leniently, marked external-only (OPM/ECLIPSE run it)");
+    check(refused, "the ResSim engine refuses an external-only case with a clear message");
+}
+
+// Block solver (block ILU / CPR-AMG / FGMRES with Schur-folded wells) must give the same answer in every mode
+static void testBlockSolver() {
+    std::printf("Block linear solver\n");
+    Case c = makeExample("spe1");
+    c.schedule.resize(1);
+    Simulator sim;
+    sim.setup(c);
+    sim.initialize();
+    bool ok = true;
+    for (int mode : {0, 1, 2}) {
+        Case cm = c;
+        cm.tuning.linearSolver = mode;
+        Simulator s2;
+        s2.setup(cm);
+        s2.initialize();
+        try {
+            while (s2.runReportStep()) {}
+        } catch (...) {
+            ok = false;
+        }
+        if (s2.stats().newton <= 0) ok = false;
+    }
+    check(ok, "SPE1 report step runs with block ILU, CPR-AMG and automatic solver selection");
+
+    // AD math: d/dx of pow(x, y) and smoothMax
+    AD<2> x = AD<2>::variable(2.0, 0), y = AD<2>::variable(3.0, 1);
+    const AD<2> f = pow(x, y);
+    check(std::fabs(f.v - 8) < 1e-12 && std::fabs(f.d[0] - 12) < 1e-12 && std::fabs(f.d[1] - 8 * std::log(2.0)) < 1e-12,
+          "AD pow(x, y): value and both partial derivatives exact");
+
+    ADV a = ADV::variable(1.5, 4, 2), b = ADV::variable(0.5, 4, 3);
+    const ADV g = exp(a * b) / (a + b);
+    const double e = std::exp(0.75);
+    check(std::fabs(g.d[2] - (0.5 * e * 2.0 - e) / 4.0) < 1e-12 &&
+          std::fabs(g.d[3] - (1.5 * e * 2.0 - e) / 4.0) < 1e-12 &&
+          g.d[0] == 0,
+          "runtime-sized AD (compositional / thermal unknowns): exact derivatives");
+}
+
+static void testSummaryWriter() {
+    std::printf("ECLIPSE binary summary writer\n");
+    Case c = makeExample("qfs");
+    Simulator sim;
+    sim.setup(c);
+    sim.initialize();
+    while (sim.runReportStep()) {}
+    std::vector<std::string> names;
+    for (auto& w : c.wells) names.push_back(w.name);
+    const ecl::Summary a = ecl::summaryFromRun(sim.summary(), names, c.units);
+    std::string err;
+    const bool wrote = ecl::writeSummary(a, "rt_smry", &err);
+    ecl::Summary b;
+    const bool read = wrote && ecl::readSummary("rt_smry.SMSPEC", b, &err);
+    bool same = read && b.time.size() == a.time.size() && b.reportIndex.size() == a.reportIndex.size();
+    for (const char* k : {"FOPT", "FPR", "FWCT"}) {
+        const int ia = a.find(k), ib = b.find(k);
+        if (ia < 0 || ib < 0) { same = false; continue; }
+        const double va = a.values[size_t(ia)].back(), vb = b.values[size_t(ib)].back();
+        if (std::fabs(va - vb) > 1e-6 * std::max(1.0, std::fabs(va))) same = false;
+    }
+    std::remove("rt_smry.SMSPEC");
+    std::remove("rt_smry.UNSMRY");
+    check(same, "SMSPEC/UNSMRY written by the own engine read back identically (vectors, times, report steps)");
+}
+
 int main(int argc, char** argv) {
     const bool verbose = argc > 1 && std::string(argv[1]) == "-v";
-    try { testIO(); testDeck(); testCPR(); testCornerPoint(); testNewtran(); testPhaseA(); testWetGas(); testEquilAndWellbore(); testPolymer(); testDualPorosity(); testPinch(); testDeckRepair(); testObsFromSummary(); testStoneAndDrsdt(); testSPE10(); testEndPointScaling(); testPassThrough(); testAquifers(); testExamples(); testStreamlines(); testStudy(); testStudyAdvanced(); testBL(); testCorrelations(); testDemo(verbose); }
+    try { testIO(); testDeck(); testCPR(); testLenientImport(); testBlockSolver(); testSummaryWriter(); testCornerPoint(); testNewtran(); testPhaseA(); testWetGas(); testEquilAndWellbore(); testPolymer(); testDualPorosity(); testPinch(); testDeckRepair(); testObsFromSummary(); testStoneAndDrsdt(); testSPE10(); testEndPointScaling(); testPassThrough(); testAquifers(); testExamples(); testStreamlines(); testStudy(); testStudyAdvanced(); testBL(); testCorrelations(); testDemo(verbose); }
     catch (const std::exception& ex) { std::printf("EXCEPTION: %s\n", ex.what()); return 2; }
     std::printf(failures ? "%d test(s) FAILED\n" : "All tests passed\n", failures);
     return failures ? 1 : 0;

@@ -44,8 +44,10 @@ public:
         int nc = 0;                                 // columns of P (= size of next level)
         std::vector<int> pRow, pCol; std::vector<double> pVal;   // prolongator (n x nc), CSR
         std::vector<int> rRow, rCol; std::vector<double> rVal;   // restriction = P^T
-        mutable std::vector<double> x, b, r;
+        mutable std::vector<double> x, b, r, e, ae;
     };
+    int sweeps = 1;         // Gauss-Seidel sweeps before / after the coarse correction
+    bool overCorrect = false; // minimal-residual scaling of the coarse correction (non-linear: use a flexible Krylov method)
 private:
     void cycle(int l) const;
     std::vector<Level> lv_;
