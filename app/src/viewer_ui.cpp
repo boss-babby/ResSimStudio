@@ -3,6 +3,7 @@
 // (orbit / pan / zoom, cell probe, well picking, context menu, cell value history).
 #include "app.h"
 #include "widgets.h"
+#include "i18n.h"
 #include "theme.h"
 #include "icons.h"
 #include "plotkit.h"
@@ -37,7 +38,7 @@ void flow(float w) {
     if (ImGui::GetCursorScreenPos().x + w > right) ImGui::NewLine();
 }
 float btnW(const char* label) { return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2; }
-void tip(const char* t) { if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", t); }
+void tip(const char* t) { if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", TRS(t)); }   // C45 translated
 
 } // namespace
 
@@ -60,17 +61,27 @@ std::vector<WellGlyph> App::wellGlyphs(const Grid& g, const Case& c, int step) c
         }
         struct Conn { int q; char dir; bool open; };
         std::vector<Conn> conns;
+        auto localValid = [&](int l, int i, int j, int k) {
+            if (l < 0 || l >= int(g.lgr.size())) return false;
+            const auto& L = g.lgr[size_t(l)];
+            return i >= 0 && i < L.nx && j >= 0 && j < L.ny && k >= 0 && k < L.nz;
+        };
         for (const auto& cp : w.completions) {
             const bool active = cp.open && (step < 0 || (cp.fromStep <= step && (cp.untilStep < 0 || step < cp.untilStep)));
-            for (int k = cp.k1; k <= cp.k2; ++k)
-                if (valid(cp.i, cp.j, k)) conns.push_back({cp.i + g.nx * (cp.j + g.ny * k), cp.dir, active});
+            for (int k = cp.k1; k <= cp.k2; ++k) {
+                if (cp.lgr >= 0) { if (localValid(cp.lgr, cp.i, cp.j, k)) conns.push_back({g.localCell(cp.lgr, cp.i, cp.j, k), cp.dir, active}); }
+                else if (valid(cp.i, cp.j, k)) conns.push_back({cp.i + g.nx * (cp.j + g.ny * k), cp.dir, active});
+            }
         }
         int hi = w.i, hj = w.j;
-        if (!valid(hi, hj, 0)) {
+        int headCell = -1;
+        if (w.lgr >= 0 && localValid(w.lgr, hi, hj, 0)) headCell = g.localCell(w.lgr, hi, hj, 0);
+        else if (w.lgr < 0 && valid(hi, hj, 0)) headCell = hi + g.nx * hj;
+        if (headCell < 0) {
             if (conns.empty()) continue;
-            int k; g.ijk(conns[0].q, hi, hj, k);
+            headCell = conns[0].q;
         }
-        const auto top = faceCentre(g, hi + g.nx * hj, 2, false);
+        const auto top = faceCentre(g, headCell, 2, false);
         gl.path.push_back({top[0], top[1], zHead});
         if (conns.empty()) gl.path.push_back({top[0], top[1], g.bbMax.z});
         else {
@@ -128,14 +139,44 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
     const int nx = b.grid ? b.grid->nx : 1, ny = b.grid ? b.grid->ny : 1, nz = b.grid ? b.grid->nz : 1;
 
     // colour map + range
-    static const char* cmaps[] = {"Turbo", "Viridis", "Jet", "Cool-warm", "Grey"};
-    flow(fs * 7.5f);
-    int cm = int(vs.cmap);
-    ImGui::SetNextItemWidth(fs * 7.5f);
-    if (ImGui::Combo("##cmap", &cm, cmaps, 5)) vs.cmap = Colormap(cm);
-    tip("Colour map");
+    flow(fs * 9.5f);
+    ImGui::SetNextItemWidth(fs * 9.5f);
+    if (ImGui::BeginCombo("##cmap", colormapName(vs.cmap), ImGuiComboFlags_HeightLarge)) {   // C30: 15 maps with previews
+        for (int pass = 0; pass < 2; ++pass) {
+            ImGui::SeparatorText(pass == 0 ? "Sequential" : "Diverging (signed changes)");
+            for (int i = 0; i < int(Colormap::Count); ++i) {
+                const Colormap m = Colormap(i);
+                if (colormapDiverging(m) != (pass == 1)) continue;
+                const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                const float sw = fs * 4.0f, sh = ImGui::GetTextLineHeight();
+                if (ImGui::Selectable(("        " + std::string(colormapName(m)) + "##cm" + std::to_string(i)).c_str(), vs.cmap == m)) vs.cmap = m;
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                for (int q = 0; q < 24; ++q) {
+                    float rgb[3]; colormapRGB(m, (q + 0.5f) / 24.0f, rgb, vs.cmapReverse);
+                    dl->AddRectFilled(ImVec2(p0.x + sw * q / 24.0f, p0.y + 1), ImVec2(p0.x + sw * (q + 1) / 24.0f + 0.5f, p0.y + sh - 1),
+                                      IM_COL32(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255), 255));
+                }
+            }
+        }
+        ImGui::Separator();
+        ImGui::Checkbox(TRL("Reverse"), &vs.cmapReverse);
+        ImGui::EndCombo();
+    }
+    tip("Colour map (15 maps; sequential for magnitudes, diverging for signed changes such as the stress-change maps). "
+        "Reverse flips the scale.");
     flow(btnW("Auto range") + ImGui::GetFrameHeight());
-    ImGui::Checkbox("Auto range", b.autoRange);
+    ImGui::Checkbox(TRL("Auto range"), b.autoRange);
+    tip("On: the colour range follows the data (see the next box). Off: type / drag a fixed range.");
+    if (*b.autoRange && b.rangeAllSteps) {
+        static const char* modes[] = {"All time steps", "This step only"};
+        int m = *b.rangeAllSteps ? 0 : 1;
+        flow(fs * 9);
+        ImGui::SetNextItemWidth(fs * 9);
+        if (ImGui::Combo("##rmode", &m, modes, 2)) *b.rangeAllSteps = m == 0;
+        tip("All time steps: one colour scale = min / max of the property over every report step of the run, so a colour means "
+            "the same value at every time (use this to watch a front or a pressure change).\nThis step only: rescaled at each "
+            "step (best contrast, but colours cannot be compared between steps).");
+    }
     if (!*b.autoRange) {
         flow(fs * 12);
         ImGui::SetNextItemWidth(fs * 12);
@@ -149,26 +190,36 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
 
     // display
     flow(btnW(ICON_LAYERS " Display"));
-    if (ImGui::Button(ICON_LAYERS " Display")) ImGui::OpenPopup("display");
+    if (ImGui::Button(TRL(ICON_LAYERS " Display"))) ImGui::OpenPopup("display");
     if (ImGui::BeginPopup("display")) {
-        ImGui::SeparatorText("Geometry");
+        ImGui::SeparatorText(TR("Geometry"));
         ImGui::SetNextItemWidth(fs * 10);
         ImGui::SliderFloat("Vertical exaggeration", &vs.zScale, 1.0f, 50.0f, "%.1fx", ImGuiSliderFlags_Logarithmic);
-        ImGui::Checkbox("Cell edges", &vs.edges); ImGui::SameLine(); ImGui::Checkbox("Bounding box", &vs.bbox);
-        ImGui::SameLine(); ImGui::Checkbox("Axes", &vs.axes);
+        ImGui::Checkbox(TRL("Cell edges"), &vs.edges); ImGui::SameLine(); ImGui::Checkbox(TRL("Bounding box"), &vs.bbox);
+        ImGui::SameLine(); ImGui::Checkbox(TRL("Axes"), &vs.axes);
         ImGui::SetNextItemWidth(fs * 10);
         ImGui::SliderFloat("Cell opacity", &vs.opacity, 0.05f, 1.0f, "%.2f");
-        ImGui::SeparatorText("Colours");
-        ImGui::Checkbox("Legend", &vs.legend); ImGui::SameLine(); ImGui::Checkbox("Logarithmic scale", &vs.logScale);
+        ImGui::SeparatorText(TR("Colours"));
+        ImGui::Checkbox(TRL("Legend"), &vs.legend); ImGui::SameLine(); ImGui::Checkbox(TRL("Logarithmic scale"), &vs.logScale);
         ImGui::SetNextItemWidth(fs * 10);
         ImGui::SliderInt("Discrete colour bands", &vs.bands, 0, 24, vs.bands < 2 ? "continuous" : "%d");
-        ImGui::SeparatorText("Wells");
-        ImGui::Checkbox("Show wells", &vs.wells); ImGui::SameLine(); ImGui::Checkbox("Labels", &vs.labels);
-        ImGui::SameLine(); ImGui::Checkbox("Draw on top", &vs.wellsXray);
+        ImGui::SeparatorText(TR("Wells"));
+        ImGui::Checkbox(TRL("Show wells"), &vs.wells); ImGui::SameLine(); ImGui::Checkbox(TRL("Labels"), &vs.labels);
+        ImGui::SameLine(); ImGui::Checkbox(TRL("Draw on top"), &vs.wellsXray);
         ImGui::SetNextItemWidth(fs * 10);
         ImGui::SliderFloat("Well radius", &vs.wellRadius, 0.3f, 4.0f, "%.1fx", ImGuiSliderFlags_Logarithmic);
-        ImGui::TextDisabled("Wells follow their completion path (deviated / horizontal);\nperforations: green producer, blue injector, grey shut.");
+        ImGui::TextDisabled("%s", TR("Wells follow their completion path (deviated / horizontal);\nperforations: green producer, blue injector, grey shut."));
+        if (V.hasPanels()) {
+            ImGui::SeparatorText(TR("Fractures (EDFM)"));
+            ImGui::Checkbox(TRL("Show fracture planes"), &vs.fractures); ImGui::SameLine(); ImGui::Checkbox(TRL("Draw on top##frac"), &vs.fracXray);
+            ImGui::TextDisabled("%s", TR("Planes are coloured with the current colour map when the property has a\nfracture value (TEMP / PRESSURE / FRACAP / FRACT / FRACP / FRACK / DTEMP),\nelse drawn orange. They lie inside the grid: 'Draw on top' or lower the opacity."));
+        }
         ImGui::EndPopup();
+    }
+    if (V.hasPanels()) {   // quick toggle of the fracture planes
+        flow(btnW("Fractures") + ImGui::GetFrameHeight());
+        ImGui::Checkbox(TRL("Fractures"), &vs.fractures);
+        tip("Show the embedded discrete fracture planes (EDFM) inside the grid");
     }
 
     // dual porosity: matrix and fracture cells share the same geometry -> show one medium at a time (matrix first)
@@ -195,11 +246,11 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
     flow(btnW(ICON_FILTER " Filter"));
     const bool filtered = vs.iMin > 0 || vs.jMin > 0 || vs.kMin > 0 || vs.iMax < nx - 1 || vs.jMax < ny - 1 || vs.kMax < nz - 1 || vs.filterValue;
     if (filtered) { ImVec4 ac = col4(Pal::Accent); ac.w = 0.55f; ImGui::PushStyleColor(ImGuiCol_Button, ac); }
-    if (ImGui::Button(ICON_FILTER " Filter")) ImGui::OpenPopup("filter");
+    if (ImGui::Button(TRL(ICON_FILTER " Filter"))) ImGui::OpenPopup("filter");
     if (filtered) ImGui::PopStyleColor();
     tip("IJK ranges, single I / J / K slices and value filter");
     if (ImGui::BeginPopup("filter")) {
-        ImGui::SeparatorText("Single slice");
+        ImGui::SeparatorText(TR("Single slice"));
         static const char* sm[] = {"None", "I slice", "J slice", "K layer"};
         ImGui::SetNextItemWidth(fs * 7);
         bool sch = ImGui::Combo("##slicemode", &u.sliceMode, sm, 4);
@@ -221,7 +272,7 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
             if (u.sliceMode == 2) vs.jMin = vs.jMax = u.slice;
             if (u.sliceMode == 3) vs.kMin = vs.kMax = u.slice;
         }
-        ImGui::SeparatorText("Index ranges (1-based, like ECLIPSE)");
+        ImGui::SeparatorText(TR("Index ranges (1-based, like ECLIPSE)"));
         int i0 = std::max(0, vs.iMin) + 1, i1 = std::min(nx - 1, vs.iMax) + 1;
         int j0 = std::max(0, vs.jMin) + 1, j1 = std::min(ny - 1, vs.jMax) + 1;
         int k0 = std::max(0, vs.kMin) + 1, k1 = std::min(nz - 1, vs.kMax) + 1;
@@ -230,15 +281,15 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
         ImGui::SetNextItemWidth(fs * 12); ch |= ImGui::DragIntRange2("J range", &j0, &j1, 0.2f, 1, ny);
         ImGui::SetNextItemWidth(fs * 12); ch |= ImGui::DragIntRange2("K range", &k0, &k1, 0.1f, 1, nz);
         if (ch) { vs.iMin = i0 - 1; vs.iMax = i1 - 1; vs.jMin = j0 - 1; vs.jMax = j1 - 1; vs.kMin = k0 - 1; vs.kMax = k1 - 1; u.sliceMode = 0; }
-        ImGui::SeparatorText("Value filter");
-        ImGui::Checkbox("Only cells with values in", &vs.filterValue);
+        ImGui::SeparatorText(TR("Value filter"));
+        ImGui::Checkbox(TRL("Only cells with values in"), &vs.filterValue);
         if (vs.filterValue) {
             ImGui::SetNextItemWidth(fs * 12);
             ImGui::DragFloatRange2("##vf", &vs.filterMin, &vs.filterMax, std::max(1e-4f, (*b.rmax - *b.rmin) * 0.005f), 0, 0, "%.4g", "%.4g");
-            if (ImGui::SmallButton("Use colour range")) { vs.filterMin = *b.rmin; vs.filterMax = *b.rmax; }
+            if (ImGui::SmallButton(TRL("Use colour range"))) { vs.filterMin = *b.rmin; vs.filterMax = *b.rmax; }
         }
         ImGui::Separator();
-        if (ImGui::Button(ICON_ROTATE_CCW " Reset filters")) { vs.iMin = vs.jMin = vs.kMin = 0; vs.iMax = vs.jMax = vs.kMax = 1 << 30; vs.filterValue = false; u.sliceMode = 0; }
+        if (ImGui::Button(TRL(ICON_ROTATE_CCW " Reset filters"))) { vs.iMin = vs.jMin = vs.kMin = 0; vs.iMax = vs.jMax = vs.kMax = 1 << 30; vs.filterValue = false; u.sliceMode = 0; }
         ImGui::EndPopup();
     }
 
@@ -249,7 +300,7 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
         ImGui::SetNextItemWidth(fs * 9);
         const std::string cur = vs.focusWell >= 0 && vs.focusWell < int(W.size()) ? W[size_t(vs.focusWell)].name : std::string("All wells");
         if (ImGui::BeginCombo("##focus", (std::string(ICON_LOCATE_FIXED " ") + cur).c_str(), ImGuiComboFlags_HeightLarge)) {
-            if (ImGui::Selectable("All wells (no focus)", vs.focusWell < 0)) vs.focusWell = -1;
+            if (ImGui::Selectable(TRL("All wells (no focus)"), vs.focusWell < 0)) vs.focusWell = -1;
             for (int i = 0; i < int(W.size()); ++i) {
                 ImGui::PushID(i);
                 ImGui::TextColored(col4(W[size_t(i)].injector ? IM_COL32(80, 160, 250, 255) : IM_COL32(60, 200, 110, 255)), W[size_t(i)].injector ? ICON_DROPLETS : ICON_CIRCLE_DOT);
@@ -267,16 +318,16 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
         SLState& sl = *b.sl;
         flow(btnW(ICON_ROUTE " Streamlines") + ImGui::GetFrameHeight() * 2);
         ImGui::BeginDisabled(!b.slAvailable && !b.slPrepare);
-        if (ImGui::Checkbox(ICON_ROUTE " Streamlines", &sl.show) && sl.show && !b.slAvailable && b.slPrepare) b.slPrepare();
+        if (ImGui::Checkbox(TRL(ICON_ROUTE " Streamlines"), &sl.show) && sl.show && !b.slAvailable && b.slPrepare) b.slPrepare();
         ImGui::EndDisabled();
         tip(b.slAvailable ? "Pollock streamlines from injectors (and aquifers) to producers at the selected step" : b.slHint.c_str());
         ImGui::SameLine();
-        if (ImGui::Button(ICON_SETTINGS "##sl")) ImGui::OpenPopup("slpop");
+        if (ImGui::Button(TRL(ICON_SETTINGS "##sl"))) ImGui::OpenPopup("slpop");
         tip("Streamline options and well allocation");
         if (ImGui::BeginPopup("slpop")) {
             if (!b.slAvailable) {
                 ImGui::TextColored(col4(Pal::Warn), "%s", b.slHint.empty() ? "Streamlines are not available for these data." : b.slHint.c_str());
-                if (b.slPrepare && ImGui::Button("Prepare streamlines")) b.slPrepare();
+                if (b.slPrepare && ImGui::Button(TRL("Prepare streamlines"))) b.slPrepare();
                 ImGui::Separator();
             }
             ImGui::SetNextItemWidth(fs * 10);
@@ -284,8 +335,8 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
             static const char* cb[] = {"Time of flight", "Injector (source)", "Producer (sink)"};
             ImGui::SetNextItemWidth(fs * 10);
             ImGui::Combo("Colour by", &sl.colorBy, cb, 3);
-            ImGui::Checkbox("Hide cells", &sl.hideCells); ImGui::SameLine(); ImGui::Checkbox("X-ray (draw through cells)", &sl.xray);
-            ImGui::Checkbox("With a focused well: only its streamlines", &sl.focusOnly);
+            ImGui::Checkbox(TRL("Hide cells"), &sl.hideCells); ImGui::SameLine(); ImGui::Checkbox(TRL("X-ray (draw through cells)"), &sl.xray);
+            ImGui::Checkbox(TRL("With a focused well: only its streamlines"), &sl.focusOnly);
             if (sl.res) {
                 const StreamlineResult& S = *sl.res;
                 ImGui::Text("%d lines (%d stalled), max TOF %.0f days, traced in %.1f ms", int(S.lines.size()), S.stalled, S.maxTof, sl.ms);
@@ -293,10 +344,10 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
                 if (!S.sources.empty() && !S.sinks.empty()) {
                     ImGui::SeparatorText("Well allocation (% of each injector's flow)");
                     const int ns = int(S.sinks.size());
-                    if (ImGui::BeginTable("alloc", ns + 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX, ImVec2(std::min(fs * 60, fs * 6 * (ns + 2)), 0))) {
-                        ImGui::TableSetupColumn("from \\ to");
-                        for (auto& n : S.sinks) ImGui::TableSetupColumn(n.c_str());
-                        ImGui::TableSetupColumn("not reaching");
+                    if (ui::beginTable("alloc", ns + 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX, ImVec2(std::min(fs * 60, fs * 6 * (ns + 2)), 0))) {
+                        ui::tableColumn("from \\ to");
+                        for (auto& n : S.sinks) ui::tableColumn(n.c_str());
+                        ui::tableColumn("not reaching");
                         ImGui::TableHeadersRow();
                         for (size_t i = 0; i < S.sources.size(); ++i) {
                             double tot = 0; for (double x : S.pairFlux[i]) tot += x;
@@ -306,45 +357,45 @@ void App::viewerToolbar(ViewerBinding& b, ViewerUi& u) {
                                 ImGui::TableSetColumnIndex(k + 1);
                                 const double f = tot > 0 ? 100.0 * S.pairFlux[i][size_t(k)] / tot : 0.0;
                                 if (f > 0.05) ImGui::TextColored(col4(f > 50 ? Pal::Ok : f > 10 ? Pal::Warn : Pal::Muted), "%.1f%%", f);
-                                else ImGui::TextDisabled("-");
+                                else ImGui::TextDisabled("%s", TR("-"));
                             }
                         }
-                        ImGui::EndTable();
+                        ui::endTable();
                     }
                 }
             }
-            ImGui::TextDisabled("Cell properties TOF / DRAINAGE / SWEEP: Model viewer, Dynamic group.");
+            ImGui::TextDisabled("%s", TR("Cell properties TOF / DRAINAGE / SWEEP: Model viewer, Dynamic group."));
             ImGui::EndPopup();
         }
     }
 
     // camera presets + snapshot
     flow(ImGui::GetFrameHeight() * 6 + 20);
-    if (ImGui::Button(ICON_SQUARE "##top")) V.viewPreset(0);
+    if (ImGui::Button(TRL(ICON_SQUARE "##top"))) V.viewPreset(0);
     tip("Top view (map)");
     ImGui::SameLine(0, 2);
-    if (ImGui::Button(ICON_PANEL_BOTTOM "##front")) V.viewPreset(1);
+    if (ImGui::Button(TRL(ICON_PANEL_BOTTOM "##front"))) V.viewPreset(1);
     tip("Front view (looking north)");
     ImGui::SameLine(0, 2);
-    if (ImGui::Button(ICON_PANEL_RIGHT "##side")) V.viewPreset(2);
+    if (ImGui::Button(TRL(ICON_PANEL_RIGHT "##side"))) V.viewPreset(2);
     tip("Side view (looking west)");
     ImGui::SameLine(0, 2);
-    if (ImGui::Button(ICON_BOX "##iso")) V.viewPreset(3);
+    if (ImGui::Button(TRL(ICON_BOX "##iso"))) V.viewPreset(3);
     tip("3D view");
     ImGui::SameLine(0, 2);
-    if (ImGui::Button(ICON_MAXIMIZE "##fit")) { V.resetCamera(); vs.focusWell = -1; }
+    if (ImGui::Button(TRL(ICON_MAXIMIZE "##fit"))) { V.resetCamera(); vs.focusWell = -1; }
     tip("Fit the whole model (clears the well focus)");
     ImGui::SameLine(0, 2);
-    if (ImGui::Button(ICON_CAMERA "##png")) ImGui::OpenPopup("snap");
+    if (ImGui::Button(TRL(ICON_CAMERA "##png"))) ImGui::OpenPopup("snap");
     tip("Save the view as a PNG image");
     if (ImGui::BeginPopup("snap")) {
         static int scale = 2;
         ImGui::TextUnformatted("Save view as PNG");
-        ImGui::RadioButton("1x (screen size)", &scale, 1); ImGui::SameLine();
-        ImGui::RadioButton("2x", &scale, 2); ImGui::SameLine();
-        ImGui::RadioButton("3x (print)", &scale, 3);
+        ImGui::RadioButton(TRL("1x (screen size)"), &scale, 1); ImGui::SameLine();
+        ImGui::RadioButton(TRL("2x"), &scale, 2); ImGui::SameLine();
+        ImGui::RadioButton(TRL("3x (print)"), &scale, 3);
         ImGui::TextDisabled("%d x %d pixels", V.width() * scale, V.height() * scale);
-        if (ImGui::Button(ICON_DOWNLOAD " Save...")) {
+        if (ImGui::Button(TRL(ICON_DOWNLOAD " Save..."))) {
             std::string path = safeFileName(b.pngName.empty() ? std::string("view") : b.pngName) + ".png";
             if (fileDialog(true, "PNG image (*.png)\0*.png\0", "png", path)) {
                 std::string err;
@@ -366,10 +417,10 @@ void App::viewerCanvas(ViewerBinding& b, ViewerUi& u, const std::function<void(i
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const int w = std::max(32, int(avail.x)), h = std::max(32, int(avail.y));
-    ID3D11ShaderResourceView* srv = V.render(w, h);
+    const ImTextureID srv = V.render(w, h);
     ImGui::InvisibleButton("##viewport", ImVec2(float(w), float(h)),
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
-    ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)srv, p0, ImVec2(p0.x + w, p0.y + h));
+    if (srv) ImGui::GetWindowDrawList()->AddImage(srv, p0, ImVec2(p0.x + w, p0.y + h));
     ImGuiIO& io = ImGui::GetIO();
     const float mx = io.MousePos.x - p0.x, my = io.MousePos.y - p0.y;
     if (ImGui::IsItemActive()) {
@@ -404,7 +455,7 @@ void App::viewerCanvas(ViewerBinding& b, ViewerUi& u, const std::function<void(i
             } else if (cell >= 0 && g && cell < g->numActive() && tooltip) {
                 ImGui::BeginTooltip();
                 tooltip(cell);
-                if (b.cellHistory) ImGui::TextDisabled("right-click: value history, slices");
+                if (b.cellHistory) ImGui::TextDisabled("%s", TR("right-click: value history, slices"));
                 ImGui::EndTooltip();
             }
         }
@@ -412,22 +463,22 @@ void App::viewerCanvas(ViewerBinding& b, ViewerUi& u, const std::function<void(i
     if (ImGui::BeginPopup("##vctx")) {
         if (u.ctxCell >= 0 && g && u.ctxCell < g->numActive()) {
             int i, j, k; g->ijk(g->globalOf[size_t(u.ctxCell)], i, j, k);
-            ImGui::TextDisabled("Cell (%d, %d, %d)   %s = %.5g", i + 1, j + 1, k + 1, b.propName.c_str(), V.valueOf(u.ctxCell));
-            if (b.cellHistory && ImGui::MenuItem(ICON_CHART_LINE "  Plot value history of this cell")) {
+            ImGui::TextDisabled("Cell %s   %s = %.5g", g->cellLabel(g->globalOf[size_t(u.ctxCell)]).c_str(), b.propName.c_str(), V.valueOf(u.ctxCell));
+            if (b.cellHistory && ImGui::MenuItem(TRL(ICON_CHART_LINE "  Plot value history of this cell"))) {
                 u.histT.clear(); u.histV.clear();
                 if (b.cellHistory(u.ctxCell, u.histT, u.histV)) {
                     u.histCell = u.ctxCell; u.histOpen = true;
-                    char t[96]; std::snprintf(t, sizeof(t), "%s in cell (%d, %d, %d)", b.propName.c_str(), i + 1, j + 1, k + 1);
+                    char t[200]; std::snprintf(t, sizeof(t), "%s in cell %s", b.propName.c_str(), g->cellLabel(g->globalOf[size_t(u.ctxCell)]).c_str());
                     u.histProp = t;
                 } else notify("No time series available for this property");
             }
-            if (ImGui::BeginMenu(ICON_SCAN_LINE "  Slice through this cell")) {
-                if (ImGui::MenuItem("I slice")) { vs.iMin = vs.iMax = i; vs.jMin = vs.kMin = 0; vs.jMax = vs.kMax = 1 << 30; u.sliceMode = 1; u.slice = i; }
-                if (ImGui::MenuItem("J slice")) { vs.jMin = vs.jMax = j; vs.iMin = vs.kMin = 0; vs.iMax = vs.kMax = 1 << 30; u.sliceMode = 2; u.slice = j; }
-                if (ImGui::MenuItem("K layer")) { vs.kMin = vs.kMax = k; vs.iMin = vs.jMin = 0; vs.iMax = vs.jMax = 1 << 30; u.sliceMode = 3; u.slice = k; }
+            if (ImGui::BeginMenu(TRL(ICON_SCAN_LINE "  Slice through this cell"))) {
+                if (ImGui::MenuItem(TRL("I slice"))) { vs.iMin = vs.iMax = i; vs.jMin = vs.kMin = 0; vs.jMax = vs.kMax = 1 << 30; u.sliceMode = 1; u.slice = i; }
+                if (ImGui::MenuItem(TRL("J slice"))) { vs.jMin = vs.jMax = j; vs.iMin = vs.kMin = 0; vs.iMax = vs.kMax = 1 << 30; u.sliceMode = 2; u.slice = j; }
+                if (ImGui::MenuItem(TRL("K layer"))) { vs.kMin = vs.kMax = k; vs.iMin = vs.jMin = 0; vs.iMax = vs.jMax = 1 << 30; u.sliceMode = 3; u.slice = k; }
                 ImGui::EndMenu();
             }
-            if (ImGui::MenuItem(ICON_COPY "  Copy cell info")) {
+            if (ImGui::MenuItem(TRL(ICON_COPY "  Copy cell info"))) {
                 char t[160]; std::snprintf(t, sizeof(t), "%d\t%d\t%d\t%s\t%.8g", i + 1, j + 1, k + 1, b.propName.c_str(), V.valueOf(u.ctxCell));
                 ImGui::SetClipboardText(t);
             }
@@ -437,12 +488,14 @@ void App::viewerCanvas(ViewerBinding& b, ViewerUi& u, const std::function<void(i
             const std::string n = V.wells()[size_t(u.ctxWell)].name;
             if (ImGui::MenuItem((std::string(ICON_LOCATE_FIXED "  Focus ") + n).c_str())) { vs.focusWell = u.ctxWell; V.focusWellCamera(u.ctxWell); }
         }
-        if (vs.focusWell >= 0 && ImGui::MenuItem(ICON_X "  Clear well focus")) vs.focusWell = -1;
-        if (ImGui::MenuItem(ICON_FILTER "  Reset filters / slices")) { vs.iMin = vs.jMin = vs.kMin = 0; vs.iMax = vs.jMax = vs.kMax = 1 << 30; vs.filterValue = false; u.sliceMode = 0; }
-        if (ImGui::MenuItem(ICON_MAXIMIZE "  Reset camera")) V.resetCamera();
+        if (vs.focusWell >= 0 && ImGui::MenuItem(TRL(ICON_X "  Clear well focus"))) vs.focusWell = -1;
+        if (ImGui::MenuItem(TRL(ICON_FILTER "  Reset filters / slices"))) { vs.iMin = vs.jMin = vs.kMin = 0; vs.iMax = vs.jMax = vs.kMax = 1 << 30; vs.filterValue = false; u.sliceMode = 0; }
+        if (ImGui::MenuItem(TRL(ICON_MAXIMIZE "  Reset camera"))) V.resetCamera();
         ImGui::EndPopup();
     }
-    ImGui::GetWindowDrawList()->AddText(ImVec2(p0.x + 10, p0.y + h - ImGui::GetFontSize() - 8), IM_COL32(150, 156, 170, 150),
+    const float* bg3 = background3d();   // C40: hint colour readable on light backgrounds too
+    const bool lightBg = 0.3f * bg3[0] + 0.59f * bg3[1] + 0.11f * bg3[2] > 0.5f;
+    ImGui::GetWindowDrawList()->AddText(ImVec2(p0.x + 10, p0.y + h - ImGui::GetFontSize() - 8), lightBg ? IM_COL32(60, 66, 80, 210) : IM_COL32(150, 156, 170, 150),
                                         "Left drag: rotate   Right/Shift drag: pan   Wheel: zoom   Click a well: focus   Right-click: menu");
     // cell history window
     if (u.histOpen) {

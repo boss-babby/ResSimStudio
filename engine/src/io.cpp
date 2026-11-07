@@ -133,7 +133,7 @@ std::string projectToString(const Case& c) {
     o << "TUNING " << num(t.initialDt) << ' ' << num(t.maxDt) << ' ' << num(t.minDt) << ' ' << num(t.growth) << ' '
       << num(t.cutFactor) << ' ' << t.maxNewton << ' ' << t.maxLinear << ' ' << num(t.cnvTol) << ' ' << num(t.mbTol) << ' '
       << num(t.linTol) << ' ' << num(t.dsMax) << ' ' << num(t.dpMaxRel) << ' ' << t.threads << "\n";
-    o << "SOLVER " << t.linearSolver << ' ' << t.cprWeights << "\n";
+    o << "SOLVER " << t.linearSolver << ' ' << t.cprWeights << ' ' << (t.mixedPrecision ? 1 : 0) << ' ' << t.gpu << ' ' << t.leanMemory << "\n";
     o << "END\n";
     return o.str();
 }
@@ -197,13 +197,15 @@ Case projectFromString(const std::string& text) {
             }
         }
         else if (k == "THPRES") { ThresholdPressure x; x.r1 = t.i(); x.r2 = t.i(); x.value = t.d(); c.thpres.push_back(x); }
-        else if (k == "SOLVER") { c.tuning.linearSolver = t.i(); const std::string r = t.rest(); if (!r.empty()) c.tuning.cprWeights = std::atoi(r.c_str()) ? 1 : 0; }
+        else if (k == "SOLVER") { c.tuning.linearSolver = t.i(); const std::string r = t.rest(); if (!r.empty()) { int a = 1, m = 0, g = 0, lm = -1; const int nr = std::sscanf(r.c_str(), "%d %d %d %d", &a, &m, &g, &lm);
+                if (nr >= 1) { c.tuning.cprWeights = a ? 1 : 0; } if (nr >= 2) { c.tuning.mixedPrecision = m != 0; } if (nr >= 3) { c.tuning.gpu = g; }
+                if (nr >= 4) { c.tuning.leanMemory = std::clamp(lm, -1, 1); } } }
         else if (k == "WPIMULT") { const std::string n = t.word(); const double m = t.d(); for (auto& w : c.wells) if (w.name == n) w.piMult = m; }
         else if (k == "PARAM") {
             StudyParam p; p.kind = ParamKind(t.i()); p.target = t.i();
             p.i1 = t.i(); p.i2 = t.i(); p.j1 = t.i(); p.j2 = t.i(); p.k1 = t.i(); p.k2 = t.i();
             p.base = t.d(); p.low = t.d(); p.high = t.d(); p.log = t.i() != 0; p.active = t.i() != 0; p.label = t.rest();
-            if (int(p.kind) < 0 || int(p.kind) > int(ParamKind::ProdRate)) throw std::runtime_error("Bad PARAM kind");
+            if (int(p.kind) < 0 || int(p.kind) >= kNumParamKinds) throw std::runtime_error("Bad PARAM kind");
             c.studyParams.push_back(p);
             continue;
         }
@@ -307,6 +309,13 @@ void saveProject(const Case& c, const std::string& path) {
     if (!f) throw std::runtime_error("Cannot write " + path);
     f << "-- RESSIM_PROJECT 2\n" << eclipseDeckToString(c);
     if (!f) throw std::runtime_error("Error while writing " + path);
+}
+
+std::string projectText(const Case& c) { return "-- RESSIM_PROJECT 2\n" + eclipseDeckToString(c); }
+Case projectFromText(const std::string& text, const std::string& baseDir) {
+    const size_t a = text.find_first_not_of(" \t\r\n");
+    if (a != std::string::npos && text.compare(a, 14, "RESSIM_PROJECT") == 0) return projectFromString(text);
+    return eclipseDeckFromString(text, baseDir);
 }
 
 Case loadProject(const std::string& path) {

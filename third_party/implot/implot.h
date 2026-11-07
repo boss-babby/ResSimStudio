@@ -725,6 +725,10 @@ typedef ImPlotPoint (*ImPlotGetter)(int idx, void* user_data);
 // Callback signature for axis transform.
 typedef double (*ImPlotTransform)(double value, void* user_data);
 
+// ResSim C48: interface translation of displayed plot text (axis labels, legend entries, plot titles). Item / plot IDs
+// are computed from the original strings, so translation never changes an ID. nullptr = no translation.
+extern const char* (*GImPlotTranslate)(const char* text);
+
 namespace ImPlot {
 
 //-----------------------------------------------------------------------------
@@ -1362,6 +1366,46 @@ IMPLOT_API void ShowMetricsWindow(bool* p_popen = nullptr);
 
 // Shows the ImPlot demo window (add implot_demo.cpp to your sources!)
 IMPLOT_API void ShowDemoWindow(bool* p_open = nullptr);
+
+
+//-----------------------------------------------------------------------------
+// [SECTION] ResSim extension: data capture of one plot (single-plot export)
+//-----------------------------------------------------------------------------
+// Set Target to a plot ID (e.g. from the ContextMenu hook or the hover export button); during the next BeginPlot /
+// EndPlot of that plot every visible item reports its data through Series, the axes through Axis, then End is called
+// and Target is cleared. kind: 0 line, 1 scatter, 2 stairs, 3 bars, 4 shaded (two series), 5 vertical lines (xs),
+// 6 horizontal lines (ys), 7 stems. yaxis: 0 = Y1, 1 = Y2, 2 = Y3.
+struct ImPlotCaptureHooks {
+    ImGuiID Target = 0;
+    bool    Active = false;
+    bool    HoverButton = true;     // draw a small export button in the top-right corner of a hovered plot
+    void  (*Begin)(ImGuiID plot_id, const char* title, void* user) = nullptr;
+    void  (*Series)(const char* label, const double* xs, const double* ys, int count, ImU32 col, float weight, int kind, int yaxis, void* user) = nullptr;
+    void  (*Axis)(int axis, const char* label, double min, double max, void* user) = nullptr;   // axis: ImAxis_X1 ... ImAxis_Y3
+    void  (*End)(void* user) = nullptr;
+    void  (*ContextMenu)(ImGuiID plot_id, const char* title, void* user) = nullptr;   // extra items at the end of the plot context menu
+    // Exact ("as on screen") export: while a plot is captured (Target) - or every plot when GeomAll is set - anti-aliasing is
+    // switched off for that plot's draw commands and its text strings are reported through GImDrawListTextHook; at the end
+    // of EndPlot, Geometry receives the index range [idx0, idx1) of the window draw list that holds the plot (frame =
+    // FrameRect x0,y0,x1,y1). kind 0 = plot, 1 = a ColormapScale drawn right after a captured plot in the same window.
+    bool    GeomAll = false;
+    void  (*Geometry)(ImDrawList* dl, int idx0, int idx1, const ImVec4& frame, int kind, void* user) = nullptr;
+    // C23 native publication layers: called while a plot is captured (Active) or, when RecordAll is set, for every plot
+    // (the app records dashboard figures). Heatmap: values as drawn (row-major unless colMajor), colour lookup table of
+    // the current colormap sampled at nlut points over [smin, smax]. Band: PlotShaded between y1 and y2. Text: PlotText
+    // (centred on x, y plus a pixel offset). Bars: vertical / horizontal bars of the given width. ColorScale: ColormapScale.
+    bool    RecordAll = false;
+    void  (*Heatmap)(const char* label, const double* values, int rows, int cols, bool colMajor, double smin, double smax, double x0, double y0,
+                     double x1, double y1, const ImU32* lut, int nlut, void* user) = nullptr;
+    void  (*Band)(const char* label, const double* xs, const double* y1, const double* y2, int n, ImU32 col, void* user) = nullptr;
+    void  (*Text)(const char* text, double x, double y, float offx, float offy, ImU32 col, bool vertical, void* user) = nullptr;
+    void  (*Bars)(const char* label, const double* xs, const double* ys, int n, double width, ImU32 fill, ImU32 line, bool horizontal, void* user) = nullptr;
+    void  (*ColorScale)(const char* label, double mn, double mx, const ImU32* lut, int nlut, void* user) = nullptr;
+    void*   User = nullptr;
+    // ResSim C40: called at the start of every EndPlot() while the plot is still current (linked time cursor)
+    void  (*PreEnd)(void* user) = nullptr;
+};
+IMPLOT_API ImPlotCaptureHooks& GetCaptureHooks();
 
 }  // namespace ImPlot
 

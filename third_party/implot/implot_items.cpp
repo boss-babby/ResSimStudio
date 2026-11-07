@@ -110,6 +110,39 @@ static IMPLOT_INLINE float  ImInvSqrt(float x) { return 1.0f / sqrtf(x); }
 
 namespace ImPlot {
 
+// ResSim: report an item's data to the capture hooks (single-plot export)
+template <typename G>
+static void CaptureItem(const char* label_id, const G& getter, ImU32 col, float weight, int kind) {
+    ImPlotCaptureHooks& H = GetCaptureHooks();
+    if (!H.Active || !H.Series || getter.Count <= 0) return;
+    ImVector<double> xs, ys;
+    xs.resize(getter.Count); ys.resize(getter.Count);
+    for (int i = 0; i < getter.Count; ++i) { const ImPlotPoint p = getter[i]; xs[i] = p.x; ys[i] = p.y; }
+    ImPlotPlot* plot = GetCurrentPlot();
+    const int yaxis = plot ? (int)plot->CurrentY - (int)ImAxis_Y1 : 0;
+    H.Series(label_id, xs.Data, ys.Data, getter.Count, col, weight, kind, yaxis, H.User);
+}
+static inline bool CaptureLayers() { const ImPlotCaptureHooks& H = GetCaptureHooks(); return H.Active || H.RecordAll; }
+template <typename G1, typename G2>
+static void CaptureBand(const char* label_id, const G1& g1, const G2& g2, ImU32 col) {
+    ImPlotCaptureHooks& H = GetCaptureHooks();
+    if (!CaptureLayers() || !H.Band) return;
+    const int n = ImMin(g1.Count, g2.Count);
+    if (n <= 0) return;
+    ImVector<double> xs, a, b; xs.resize(n); a.resize(n); b.resize(n);
+    for (int i = 0; i < n; ++i) { const ImPlotPoint p = g1[i], q = g2[i]; xs[i] = p.x; a[i] = p.y; b[i] = q.y; }
+    H.Band(label_id, xs.Data, a.Data, b.Data, n, col, H.User);
+}
+template <typename G1>
+static void CaptureBars(const char* label_id, const G1& g1, double width, ImU32 fill, ImU32 line, bool horizontal) {
+    ImPlotCaptureHooks& H = GetCaptureHooks();
+    if (!H.Active || !H.Bars || g1.Count <= 0) return;
+    ImVector<double> xs, ys; xs.resize(g1.Count); ys.resize(g1.Count);
+    for (int i = 0; i < g1.Count; ++i) { const ImPlotPoint p = g1[i]; xs[i] = p.x; ys[i] = p.y; }
+    H.Bars(label_id, xs.Data, ys.Data, g1.Count, width, fill, line, horizontal, H.User);
+}
+
+
 //-----------------------------------------------------------------------------
 // [SECTION] Utils
 //-----------------------------------------------------------------------------
@@ -345,7 +378,8 @@ ImPlotItem* RegisterOrGetItem(const char* label_id, ImPlotItemFlags flags, bool*
     if (!ImHasFlag(flags, ImPlotItemFlags_NoLegend) && ImGui::FindRenderedTextEnd(label_id, nullptr) != label_id) {
         Items.Legend.Indices.push_back(idx);
         item->NameOffset = Items.Legend.Labels.size();
-        Items.Legend.Labels.append(label_id, label_id + strlen(label_id) + 1);
+        const char* shown = GImPlotTranslate ? GImPlotTranslate(label_id) : label_id;   // ResSim C48: translated legend text
+        Items.Legend.Labels.append(shown, shown + strlen(shown) + 1);
     }
     else {
         item->Show = true;
@@ -1921,6 +1955,7 @@ void PlotLineEx(const char* label_id, const _Getter& getter, const ImPlotSpec& s
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        CaptureItem(label_id, getter, ImGui::GetColorU32(s.Spec.LineColor), s.Spec.LineWeight, 0);
         if (getter.Count > 1) {
             if (ImHasFlag(spec.Flags, ImPlotLineFlags_Shaded) && s.RenderFill) {
                 GetterOverrideY<_Getter> getter2(getter, 0);
@@ -2026,6 +2061,7 @@ void PlotScatterEx(const char* label_id, const Getter& getter, const ImPlotSpec&
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        CaptureItem(label_id, getter, ImGui::GetColorU32(s.Spec.MarkerFillColor.w > 0 ? s.Spec.MarkerFillColor : s.Spec.MarkerLineColor), s.Spec.MarkerSize, 1);
         if (s.RenderMarkers) {
             if (ImHasFlag(spec.Flags,ImPlotScatterFlags_NoClip)) {
                 PopPlotClipRect();
@@ -2192,6 +2228,7 @@ void PlotStairsEx(const char* label_id, const Getter& getter, const ImPlotSpec& 
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        CaptureItem(label_id, getter, ImGui::GetColorU32(s.Spec.LineColor), s.Spec.LineWeight, 2);
         if (getter.Count > 1) {
             if (s.RenderFill && ImHasFlag(spec.Flags,ImPlotStairsFlags_Shaded)) {
                 const ImU32 col_fill = ImGui::GetColorU32(s.Spec.FillColor);
@@ -2280,6 +2317,8 @@ void PlotShadedEx(const char* label_id, const Getter1& getter1, const Getter2& g
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        if (GetCaptureHooks().Band) CaptureBand(label_id, getter1, getter2, ImGui::GetColorU32(s.Spec.FillColor));
+        else { CaptureItem(label_id, getter1, ImGui::GetColorU32(s.Spec.FillColor), 1.0f, 4); CaptureItem(label_id, getter2, ImGui::GetColorU32(s.Spec.FillColor), 1.0f, 4); }
         if (s.RenderFill) {
             if (s.Spec.FillColors != nullptr) {
                 GetterIdxColor color_getter(s.Spec.FillColors, getter1.Count, s.Spec.FillAlpha);
@@ -2350,6 +2389,8 @@ void PlotBarsVEx(const char* label_id, const Getter1& getter1, const Getter2 get
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        if (GetCaptureHooks().Bars) CaptureBars(label_id, getter1, width, ImGui::GetColorU32(s.Spec.FillColor), ImGui::GetColorU32(s.Spec.LineColor), false);
+        else CaptureItem(label_id, getter1, ImGui::GetColorU32(s.Spec.FillColor), 1.0f, 3);
         const ImU32 col_fill = ImGui::GetColorU32(s.Spec.FillColor);
         const ImU32 col_line = ImGui::GetColorU32(s.Spec.LineColor);
         bool rend_fill = s.RenderFill;
@@ -2650,6 +2691,7 @@ void PlotStemsEx(const char* label_id, const _GetterM& getter_mark, const _Gette
             return;
         }
         const ImPlotNextItemData& s = GetItemData();
+        CaptureItem(label_id, getter_mark, ImGui::GetColorU32(s.Spec.LineColor), s.Spec.LineWeight, 7);
         // render stems
         if (s.RenderLine) {
             const ImU32 col_line = ImGui::GetColorU32(s.Spec.LineColor);
@@ -2722,6 +2764,7 @@ void PlotInfLines(const char* label_id, const T* values, int count, const ImPlot
                 return;
             }
             const ImPlotNextItemData& s = GetItemData();
+            CaptureItem(label_id, getter_min, ImGui::GetColorU32(s.Spec.LineColor), s.Spec.LineWeight, 6);
             const ImU32 col_line = ImGui::GetColorU32(s.Spec.LineColor);
             if (s.RenderLine) {
                 if (s.Spec.LineColors != nullptr) {
@@ -2744,6 +2787,7 @@ void PlotInfLines(const char* label_id, const T* values, int count, const ImPlot
                 return;
             }
             const ImPlotNextItemData& s = GetItemData();
+            CaptureItem(label_id, get_min, ImGui::GetColorU32(s.Spec.LineColor), s.Spec.LineWeight, 5);
             const ImU32 col_line = ImGui::GetColorU32(s.Spec.LineColor);
             if (s.RenderLine) {
                 if (s.Spec.LineColors != nullptr) {
@@ -3191,6 +3235,17 @@ void PlotHeatmap(const char* label_id, const T* values, int rows, int cols, doub
         ImDrawList& draw_list = *GetPlotDrawList();
         const bool col_maj = ImHasFlag(spec.Flags, ImPlotHeatmapFlags_ColMajor);
         IndexerIdx<T> indexer(values,rows*cols,spec.Offset,Stride<T>(spec));
+        {   // ResSim C23: native heatmap layer for the publication export
+            ImPlotCaptureHooks& H = GetCaptureHooks();
+            if (H.Heatmap && CaptureLayers()) {
+                ImVector<double> v; v.resize(rows * cols);
+                for (int i = 0; i < rows * cols; ++i) v[i] = (double)indexer[i];
+                ImU32 lut[256];
+                const ImPlotColormap cm = GImPlot->Style.Colormap;
+                for (int k = 0; k < 256; ++k) lut[k] = SampleColormapU32(k / 255.0f, cm);
+                H.Heatmap(label_id, v.Data, rows, cols, col_maj, scale_min, scale_max, bounds_min.x, bounds_min.y, bounds_max.x, bounds_max.y, lut, 256, H.User);
+            }
+        }
         RenderHeatmap(draw_list, indexer, rows, cols, scale_min, scale_max, fmt, bounds_min, bounds_max, true, col_maj);
         EndItem();
     }
@@ -3483,6 +3538,10 @@ void PlotText(const char* text, double x, double y, const ImVec2& pixel_offset, 
     ImDrawList & draw_list = *GetPlotDrawList();
     PushPlotClipRect();
     ImU32 colTxt = GetStyleColorU32(ImPlotCol_InlayText);
+    {   // ResSim C23: native text layer
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.Text && CaptureLayers()) H.Text(text, x, y, pixel_offset.x, pixel_offset.y, colTxt, ImHasFlag(spec.Flags, ImPlotTextFlags_Vertical), H.User);
+    }
     if (ImHasFlag(spec.Flags,ImPlotTextFlags_Vertical)) {
         ImVec2 siz = CalcTextSizeVertical(text) * 0.5f;
         ImVec2 ctr = siz * 0.5f;

@@ -1,0 +1,20 @@
+# (a) Aspo HRL: AE per injection stage vs volume
+"injected volume per stage (l) (HF1)","HF1","injected volume per stage (l) (HF2)","HF2","injected volume per stage (l) (HF3)","HF3","injected volume per stage (l) (HF4)","HF4","injected volume per stage (l) (HF5)","HF5","injected volume per stage (l) (HF6)","HF6"
+0.765833333,0,2.9563,4,0.1266,0,0.243066667,1,0.2108,0,8.71086667,15
+2.65773333,3,5.0265,6,0.1226,0,1.74633333,0,0.48125,0,5.15626667,4
+4.3978,10,1.2193,0,3.34266667,0,1.92933333,0,0.7435,0,5.09061667,5
+5.143,12,5.1855,17,5.1923,0,,,4.25833333,0,5.17581667,3
+4.67076667,3,4.8416,15,5.54813333,1,,,6.467,0,,
+9.25113333,20,9.42353333,50,10.5384,15,,,3.83675,0,,
+
+# (b) Stage-count models: AIC relative to best
+"model (dAIC)","dAIC"
+1,0
+2,3.64697652
+3,1.87830877
+4,8.87920679
+5,14.8086399
+6,65.6609469
+7,86.506607
+8,111.81441
+

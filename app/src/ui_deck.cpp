@@ -2,10 +2,11 @@
 #include "app.h"
 #include "resources.h"
 #include "widgets.h"
+#include "i18n.h"
 #include "imgui_internal.h"
 #include "ressim/io.h"
 #include "ressim/deck_parser.h"
-#include <windows.h>
+#include "platform.h"
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -41,9 +42,7 @@ const std::map<std::string, KwDoc>& keywordDocs(bool* found = nullptr) {
     static bool loaded = false, ok = false;
     if (!loaded) {
         loaded = true;
-        char buf[MAX_PATH] = {0};
-        GetModuleFileNameA(nullptr, buf, MAX_PATH);
-        std::string dir(buf); const size_t sl = dir.find_last_of("\\/"); dir = sl == std::string::npos ? std::string() : dir.substr(0, sl + 1);
+        const std::string dir = plat::exeDir();
         std::ifstream ff(dir + "keyword_docs.txt");     // optional override; the manual is embedded in the exe
         std::istringstream fe;
         if (!ff) fe.str(std::string(appResource(RES_KEYWORD_DOCS)));
@@ -96,6 +95,19 @@ std::string sectionsOf(uint16_t bits) {
 
 } // namespace
 
+// C40: keyword list for the command palette (name, one-line summary)
+std::vector<std::pair<std::string, std::string>> keywordIndexList() {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& kv : keywordDocs()) {
+        std::string s = kv.second.summary;
+        const size_t nl = s.find_first_of("\n.");
+        if (nl != std::string::npos && nl > 20) s.resize(nl);
+        if (s.size() > 90) s = s.substr(0, 87) + "...";
+        out.push_back({kv.first, s});
+    }
+    return out;
+}
+
 void App::openKeywordReference(const std::string& kw) {
     showDeckTools_ = true;
     deckTab_ = 1; deckTabSet_ = true;
@@ -127,12 +139,12 @@ void App::keywordDocView(const std::string& kw) {
     if (!d.alias.empty() && d.alias != kw) ImGui::TextDisabled("Family: %s", d.alias.c_str());
     ImGui::Separator();
     ImGui::TextWrapped("%s", d.summary.c_str());
-    if (!d.params.empty() && ImGui::CollapsingHeader("Items", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::BeginTable("kwp", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 2);
-            ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-            ImGui::TableSetupColumn("Default / units", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch, 3.5f);
+    if (!d.params.empty() && ImGui::CollapsingHeader(TRL("Items"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ui::beginTable("kwp", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
+            ui::tableColumn("#", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 2);
+            ui::tableColumn("Item", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+            ui::tableColumn("Default / units", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ui::tableColumn("Description", ImGuiTableColumnFlags_WidthStretch, 3.5f);
             ImGui::TableHeadersRow();
             for (const auto& p : d.params) {
                 ImGui::TableNextRow();
@@ -145,11 +157,11 @@ void App::keywordDocView(const std::string& kw) {
                 std::string desc = p.desc; if (!p.options.empty()) desc += "  Options: " + p.options;
                 ImGui::TextWrapped("%s", desc.c_str());
             }
-            ImGui::EndTable();
+            ui::endTable();
         }
     }
-    if (!d.example.empty() && ImGui::CollapsingHeader("Example")) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.85f, 0.75f, 1));
+    if (!d.example.empty() && ImGui::CollapsingHeader(TRL("Example"))) {
+        ImGui::PushStyleColor(ImGuiCol_Text, themeIsLight() ? ImVec4(0.16f, 0.36f, 0.10f, 1) : ImVec4(0.80f, 0.85f, 0.75f, 1));
         ImGui::TextWrapped("%s", d.example.c_str());
         ImGui::PopStyleColor();
     }
@@ -161,10 +173,10 @@ void App::panelDeckTools() {
     if (!ImGui::Begin("Deck tools", &showDeckTools_)) { ImGui::End(); return; }
     if (ImGui::BeginTabBar("decktabs")) {
         // ------------------------------------------------ import report
-        if (ImGui::BeginTabItem("Import report", nullptr, deckTab_ == 0 && deckTabSet_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+        if (ui::tabItem("Import report", nullptr, deckTab_ == 0 && deckTabSet_ ? ImGuiTabItemFlags_SetSelected : 0)) {
             if (deckTab_ == 0) deckTabSet_ = false;
             if (deckReportPath_.empty()) {
-                ImGui::TextDisabled("No deck imported yet. Use File > Import ECLIPSE deck...");
+                ImGui::TextDisabled("%s", TR("No deck imported yet. Use File > Import ECLIPSE deck..."));
             } else {
                 int nInfo = 0, nWarn = 0, nErr = 0;
                 for (const auto& m : deckReport_) (m.level >= 2 ? nErr : m.level == 1 ? nWarn : nInfo)++;
@@ -172,23 +184,23 @@ void App::panelDeckTools() {
                 ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1), "%d errors", nErr); ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1), "%d warnings", nWarn); ImGui::SameLine();
                 ImGui::TextDisabled("%d notes", nInfo);
-                ImGui::Checkbox("Notes", &deckShowInfo_); ImGui::SameLine();
-                ImGui::Checkbox("Warnings", &deckShowWarn_); ImGui::SameLine();
+                ImGui::Checkbox(TRL("Notes"), &deckShowInfo_); ImGui::SameLine();
+                ImGui::Checkbox(TRL("Warnings"), &deckShowWarn_); ImGui::SameLine();
                 static ImGuiTextFilter filter;
                 filter.Draw("Filter", ImGui::GetFontSize() * 14); ImGui::SameLine();
-                if (ImGui::SmallButton("Copy all")) {
+                if (ImGui::SmallButton(TRL("Copy all"))) {
                     std::ostringstream os;
                     for (const auto& m : deckReport_)
                         os << (m.level >= 2 ? "ERROR" : m.level == 1 ? "WARN " : "NOTE ") << "  " << m.keyword << "  " << m.file << ':' << m.line << "  " << m.text << "\n";
                     ImGui::SetClipboardText(os.str().c_str());
                 }
-                ImGui::TextDisabled("Double-click a row to open the keyword reference.");
-                if (ImGui::BeginTable("deckrep", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TextDisabled("%s", TR("Double-click a row to open the keyword reference."));
+                if (ui::beginTable("deckrep", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp, ImVec2(0, -FLT_MIN))) {   // fills the report panel
                     ImGui::TableSetupScrollFreeze(0, 1);
-                    ImGui::TableSetupColumn("Level", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.5f);
-                    ImGui::TableSetupColumn("Keyword", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7);
-                    ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11);
-                    ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch);
+                    ui::tableColumn("Level", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.5f);
+                    ui::tableColumn("Keyword", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7);
+                    ui::tableColumn("Location", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11);
+                    ui::tableColumn("Message", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableHeadersRow();
                     for (size_t i = 0; i < deckReport_.size(); ++i) {
                         const DeckMessage& m = deckReport_[i];
@@ -212,18 +224,18 @@ void App::panelDeckTools() {
                         ImGui::TableNextColumn(); ImGui::TextDisabled("%s", loc.c_str());
                         ImGui::TableNextColumn(); ImGui::TextWrapped("%s", m.text.c_str());
                     }
-                    ImGui::EndTable();
+                    ui::endTable();
                 }
             }
             ImGui::EndTabItem();
         }
         // ------------------------------------------------ keyword reference
-        if (ImGui::BeginTabItem("Keyword reference", nullptr, deckTab_ == 1 && deckTabSet_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+        if (ui::tabItem("Keyword reference", nullptr, deckTab_ == 1 && deckTabSet_ ? ImGuiTabItemFlags_SetSelected : 0)) {
             if (deckTab_ == 1) deckTabSet_ = false;
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
             ImGui::InputTextWithHint("##kws", "search keyword", kwSearch_, sizeof(kwSearch_), ImGuiInputTextFlags_CharsUppercase);
             ImGui::SameLine();
-            ImGui::Checkbox("Supported only", &kwSupportedOnly_);
+            ImGui::Checkbox(TRL("Supported only"), &kwSupportedOnly_);
             const float listW = ImGui::GetFontSize() * 14;
             ImGui::BeginChild("kwlist", ImVec2(listW, 0), ImGuiChildFlags_Borders);
             const std::string q(kwSearch_);
@@ -233,7 +245,7 @@ void App::panelDeckTools() {
                 if (!q.empty() && name.find(q) == std::string::npos) continue;
                 const deck::Support s = deck::ressimSupport(name);
                 if (kwSupportedOnly_ && (s == deck::Support::Unsupported || s == deck::Support::Unknown)) continue;
-                if (++shown > 1500) { ImGui::TextDisabled("... refine the search"); break; }
+                if (++shown > 1500) { ImGui::TextDisabled("%s", TR("... refine the search")); break; }
                 ImGui::PushStyleColor(ImGuiCol_Text, supportColor(s));
                 if (ImGui::Selectable(k.name, kwSel_ == name)) kwSel_ = name;
                 ImGui::PopStyleColor();
@@ -242,7 +254,7 @@ void App::panelDeckTools() {
             ImGui::SameLine();
             ImGui::BeginChild("kwdoc", ImVec2(0, 0), ImGuiChildFlags_Borders);
             if (kwSel_.empty()) {
-                ImGui::TextDisabled("Select a keyword. Colours: ");
+                ImGui::TextDisabled("%s", TR("Select a keyword. Colours: "));
                 ImGui::TextColored(supportColor(deck::Support::Full), "Full"); ImGui::SameLine();
                 ImGui::TextColored(supportColor(deck::Support::Partial), "Partial"); ImGui::SameLine();
                 ImGui::TextColored(supportColor(deck::Support::Ignored), "Ignored (harmless)"); ImGui::SameLine();

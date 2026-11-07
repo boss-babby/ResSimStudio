@@ -59,7 +59,19 @@ StreamlineResult traceStreamlines(const Simulator& sim, const StreamlineOptions&
     std::vector<CellFaces> F(na);
     auto faceOf = [&](int a, int b, char dir) {
         int ia, ja, ka, ib, jb, kb;
-        g.ijk(g.globalOf[a], ia, ja, ka); g.ijk(g.globalOf[b], ib, jb, kb);
+        const int ga = g.globalOf[a], gb = g.globalOf[b];
+        if ((g.isLocal(ga) || g.isLocal(gb)) && (dir == 'X' || dir == 'Y' || dir == 'Z')) {
+            // local grid refinement: side from the cell geometry (axis of cell a, centre of b)
+            const auto& cr = g.corners[size_t(ga)];
+            const int ax = dir == 'X' ? 1 : dir == 'Y' ? 2 : 4;
+            float v[3] = {0, 0, 0};
+            for (int m = 0; m < 8; ++m) { const float s = (m & ax) ? 0.25f : -0.25f; v[0] += s * cr[m].x; v[1] += s * cr[m].y; v[2] += s * cr[m].z; }
+            const auto ca = g.center[size_t(ga)], cb = g.center[size_t(gb)];
+            const float d = v[0] * (cb.x - ca.x) + v[1] * (cb.y - ca.y) + v[2] * (cb.z - ca.z);
+            const int axis = dir == 'X' ? 0 : dir == 'Y' ? 1 : 2;
+            return 2 * axis + (d > 0 ? 1 : 0);
+        }
+        g.ijk(ga, ia, ja, ka); g.ijk(gb, ib, jb, kb);
         int axis;
         if (dir == 'X') axis = 0; else if (dir == 'Y') axis = 1; else if (dir == 'Z') axis = 2;
         else {
@@ -194,10 +206,16 @@ StreamlineResult traceStreamlines(const Simulator& sim, const StreamlineOptions&
                             const Vec3 P = L.pts.back();
                             for (auto& l : links) {
                                 if (l.out <= 0) continue;
+                                // several neighbours across one face (fault throw, LGR host/child boundary): prefer the one
+                                // whose bounding box contains the exit point, in depth first, then laterally
                                 const auto& cb = g.corners[g.globalOf[l.nb]];
-                                float zmin = 1e30f, zmax = -1e30f;
-                                for (auto& v : cb) { zmin = std::min(zmin, v.z); zmax = std::max(zmax, v.z); }
-                                const double score = (P.z >= zmin && P.z <= zmax ? 1e30 : 0) + l.out;
+                                float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+                                for (auto& v : cb) {
+                                    lo[0] = std::min(lo[0], v.x); hi[0] = std::max(hi[0], v.x); lo[1] = std::min(lo[1], v.y); hi[1] = std::max(hi[1], v.y);
+                                    lo[2] = std::min(lo[2], v.z); hi[2] = std::max(hi[2], v.z);
+                                }
+                                auto in = [&](int d, double x) { const double tol = 1e-3 * (hi[d] - lo[d]) + 1e-6; return x >= lo[d] - tol && x <= hi[d] + tol; };
+                                const double score = (in(2, P.z) ? 2e30 : 0) + (in(0, P.x) && in(1, P.y) ? 1e30 : 0) + l.out;
                                 if (score > best) { best = score; nb = l.nb; }
                             }
                         }

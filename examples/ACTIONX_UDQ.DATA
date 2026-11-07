@@ -1,0 +1,250 @@
+-- =====================================================================================================================
+-- ACTIONX_UDQ: run-time logic of an ECLIPSE / OPM deck in the ResSim engine (C31)
+--   * UDQ  - user-defined quantities: field water cut, an injection target from voidage, a producer rate limit
+--   * UDA  - the producer ORAT limit and the injector RATE come from UDQs (re-evaluated every time step)
+--   * ACTIONX - a producer whose water cut exceeds 0.8 at the end of a report step is shut ('?' = the triggering
+--     wells, up to 4 runs); once the voidage replacement has raised the field pressure above 5300 psi the producer limit is raised (UDQ ASSIGN
+--     inside the action) and the injector BHP limit is lowered to 5800 psi (WELTARG)
+-- The same deck runs unchanged in OPM Flow / ECLIPSE (UDQ / ACTIONX are kept verbatim on import / export).
+-- 11 x 11 x 3, FIELD units, SPE1 fluids, 5-spot with an off-centre producer (P1 breaks through first)
+-- =====================================================================================================================
+RUNSPEC
+
+TITLE
+ACTIONX + UDQ + UDA waterflood (11x11x3, FIELD)
+
+DIMENS
+ 11 11 3 /
+
+OIL
+WATER
+GAS
+DISGAS
+
+FIELD
+
+TABDIMS
+ 1 1 20 20 /
+
+EQLDIMS
+ 1 1* 20 /
+
+WELLDIMS
+ 5 3 1 5 /
+
+UDQDIMS
+ 50 25 0 50 50 0 0 50 0 20 /
+
+UDADIMS
+ 10 1* 10 /
+
+ACTDIMS
+ 4 50 80 8 /
+
+START
+ 1 'JAN' 2025 /
+
+UNIFOUT
+
+GRID
+
+DX
+ 363*300
+/
+
+DY
+ 363*300
+/
+
+DZ
+ 121*20 121*30 121*40
+/
+
+TOPS
+ 121*8325
+/
+
+PORO
+ 363*0.22
+/
+
+PERMX
+ 121*400 121*120 121*250
+/
+
+PERMY
+ 121*400 121*120 121*250
+/
+
+PERMZ
+ 121*40 121*12 121*25
+/
+
+INIT
+
+PROPS
+
+PVTW
+ 4017.55 1.038 3.22e-06 0.318 0 /
+
+ROCK
+ 14.7 3e-06 /
+
+DENSITY
+ 53.66 64.49 0.0533 /
+
+PVTO
+ 0.001  14.7 1.062 1.04 /
+ 0.0905  264.7 1.15 0.975 /
+ 0.18  514.7 1.207 0.91 /
+ 0.371  1014.7 1.295 0.83 /
+ 0.636  2014.7 1.435 0.695 /
+ 0.775  2514.7 1.5 0.641 /
+ 0.93  3014.7 1.565 0.594 /
+ 1.27  4014.7 1.695 0.51
+        9014.7 1.579 0.74 /
+ 1.618  5014.7 1.827 0.449
+        9014.7 1.737 0.631 /
+/
+
+PVDG
+ 14.7 166.666 0.008
+ 264.7 12.093 0.0096
+ 514.7 6.274 0.0112
+ 1014.7 3.197 0.014
+ 2014.7 1.614 0.0189
+ 2514.7 1.294 0.0208
+ 3014.7 1.08 0.0228
+ 4014.7 0.811 0.0268
+ 5014.7 0.649 0.0309
+ 9014.7 0.386 0.047
+/
+
+SWOF
+ 0.20 0.0    1.0   0
+ 0.25 0.005  0.80  0
+ 0.30 0.02   0.62  0
+ 0.35 0.045  0.46  0
+ 0.40 0.08   0.33  0
+ 0.45 0.125  0.22  0
+ 0.50 0.18   0.13  0
+ 0.55 0.245  0.07  0
+ 0.60 0.32   0.03  0
+ 0.65 0.405  0.008 0
+ 0.70 0.50   0.0   0
+ 1.00 1.00   0.0   0
+/
+
+SGOF
+ 0 0 1 0
+ 0.001 0 1 0
+ 0.02 0 0.997 0
+ 0.05 0.005 0.98 0
+ 0.12 0.025 0.7 0
+ 0.2 0.075 0.35 0
+ 0.25 0.125 0.2 0
+ 0.3 0.19 0.09 0
+ 0.4 0.41 0.021 0
+ 0.45 0.6 0.01 0
+ 0.5 0.72 0.001 0
+ 0.6 0.87 0.0001 0
+ 0.7 0.94 0 0
+ 0.85 0.98 0 0
+ 0.88 0.984 0 0
+/
+
+SOLUTION
+
+EQUIL
+ 8400 4600 8900 0 8300 0 1 1* 0 /
+
+RSVD
+ 7300 1.27
+ 9450 1.27
+/
+
+SUMMARY
+
+FOPR
+FWPR
+FWIR
+FOPT
+FPR
+FWCT
+WOPR
+ 'P*' /
+WWCT
+ 'P*' /
+WWIR
+ 'I1' /
+FUWCT
+FUINJ
+FUPLIM
+
+SCHEDULE
+
+TUNING
+ 1 30 /
+/
+/
+
+WELSPECS
+ 'P1' 'G1' 3 3 8400 OIL /
+ 'P2' 'G1' 11 1 8400 OIL /
+ 'P3' 'G1' 1 11 8400 OIL /
+ 'P4' 'G1' 11 11 8400 OIL /
+ 'I1' 'G1' 6 6 8400 WATER /
+/
+
+COMPDAT
+ 'P*' 2* 1 3 OPEN 1* 1* 0.5 /
+ 'I1' 2* 1 3 OPEN 1* 1* 0.5 /
+/
+
+UDQ
+-- field water cut (also written to the summary as FUWCT)
+ DEFINE FUWCT FWPR / (FWPR + FOPR) /
+-- injection target: the produced reservoir volume (voidage replacement 1.05) + 500 stb/d
+ DEFINE FUINJ 1.05 * FVPR + 500 /
+-- producer oil-rate limit (raised by the action PRESSURE)
+ ASSIGN FUPLIM 1500 /
+ UNITS FUWCT 'frac' /
+ UNITS FUINJ 'STB/DAY' /
+ UNITS FUPLIM 'STB/DAY' /
+/
+
+WCONPROD
+ 'P*' OPEN ORAT 'FUPLIM' 4* 1000 /
+/
+
+WCONINJE
+ 'I1' WATER OPEN RATE 'FUINJ' 1* 6000 /
+/
+
+ACTIONX
+ WCUT 4 /
+  WWCT 'P*' > 0.8 /
+/
+WELOPEN
+ '?' SHUT /
+/
+ENDACTIO
+
+ACTIONX
+ PRESSURE 1 /
+ FPR > 5300 AND
+ DAY >= 1 /
+/
+UDQ
+ ASSIGN FUPLIM 2200 /
+/
+WELTARG
+ 'I1' BHP 5800 /
+/
+ENDACTIO
+
+TSTEP
+ 10 20 30 30 24*60
+/
+
+END

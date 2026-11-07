@@ -1,0 +1,89 @@
+PRE case NSB u=1 max CFF -0.9715 bar (below failure)
+EPS case NSB N(dt 10) 3.220025897 N(dt 5) 3.233461976 eps 1.252e-02 (relative)
+PAIR NSB  0 A [0.42 1.11 1.10 1.37] B [0.94 1.17 0.75 1.14] maxCFF 0.423 -0.547 (not both feasible) N 4.4767 3.35431
+PAIR NSB  1 A [0.54 0.79 1.54 1.12] B [1.02 1.01 1.04 0.93] maxCFF 0.658 -1.08 (not both feasible) N 4.80785 3.25307
+PAIR NSB  2 A [1.33 1.11 0.36 1.19] B [0.87 1.35 1.01 0.77] maxCFF -0.305 0.00982 (not both feasible) N 3.83262 3.96767
+PAIR NSB  3 A [1.19 1.40 1.02 0.38] B [1.00 0.97 1.20 0.84] maxCFF 0.29 -0.41 (not both feasible) N 4.63014 3.50306
+PAIR NSB  4 A [1.05 1.42 0.26 1.28] B [1.32 0.53 0.60 1.55] maxCFF 0.308 0.824 (not both feasible) N 4.19895 4.54192
+PAIR NSB  5 A [0.59 1.07 1.41 0.92] B [1.27 0.52 0.96 1.25] maxCFF 0.4 -0.0517 (not both feasible) N 4.45072 3.79563
+PAIR NSB  6 A [1.23 0.31 0.79 1.67] B [1.29 1.17 0.30 1.24] maxCFF 0.99 -0.446 (not both feasible) N 4.98543 3.84384
+PAIR NSB  7 A [1.12 1.34 0.39 1.15] B [1.03 1.05 0.64 1.29] maxCFF 0.0537 -0.0249 (not both feasible) N 3.919 3.42697
+PAIR NSB  8 A [1.06 0.97 1.37 0.61] B [0.50 1.33 1.66 0.50] maxCFF 0.338 0.927 (not both feasible) N 4.09587 5.56665
+PAIR NSB  9 A [1.59 0.96 0.66 0.78] B [1.55 0.38 0.96 1.11] maxCFF 0.612 0.497 (not both feasible) N 4.48524 4.38828
+PAIR NSB 10 A [1.11 0.97 1.46 0.46] B [0.54 0.66 1.31 1.48] maxCFF 0.57 0.677 (not both feasible) N 4.47905 5.09624
+PAIR NSB 11 A [0.96 0.74 0.69 1.61] B [0.34 1.13 1.05 1.48] maxCFF 0.908 0.67 (not both feasible) N 4.49307 4.75825
+PAIR NSB 12 A [0.85 1.50 0.72 0.93] B [0.27 1.06 1.61 1.06] maxCFF 0.499 0.798 (not both feasible) N 4.32789 5.15914
+PAIR NSB 13 A [0.84 1.02 1.18 0.95] B [0.65 0.96 1.28 1.10] maxCFF -0.503 -0.085 mid -0.289 feasible N 3.55621 4.07248 mid 3.77605 delta -1.014e-02
+PAIR NSB 14 A [1.58 0.75 0.43 1.25] B [0.56 1.58 0.42 1.44] maxCFF 0.55 0.624 (not both feasible) N 4.46208 4.80455
+PAIR NSB 15 A [1.13 0.55 1.31 1.01] B [0.92 0.50 0.87 1.71] maxCFF -0.0455 1.04 (not both feasible) N 3.84831 5.03314
+PAIR NSB 16 A [1.36 0.49 0.95 1.20] B [1.29 0.73 0.76 1.22] maxCFF -0.225 -0.25 mid -0.238 feasible N 3.88862 3.58801 mid 3.72388 delta -3.876e-03
+PAIR NSB 17 A [0.42 1.46 1.27 0.84] B [1.63 0.45 0.85 1.07] maxCFF 0.322 0.586 (not both feasible) N 4.83687 4.52783
+PAIR NSB 18 A [1.01 0.61 1.31 1.06] B [1.15 0.94 0.99 0.92] maxCFF -0.02 -1.11 mid -0.677 feasible N 3.9014 3.22964 mid 3.39806 delta -4.928e-02
+PAIR NSB 19 A [1.38 0.60 0.31 1.70] B [0.80 1.22 1.38 0.60] maxCFF 1.08 0.391 (not both feasible) N 4.9399 4.51422
+PAIR NSB 20 A [1.42 0.87 0.99 0.72] B [1.40 0.67 1.43 0.51] maxCFF 0.0659 0.463 (not both feasible) N 3.88026 4.5505
+PAIR NSB 21 A [1.02 1.38 1.03 0.57] B [1.19 1.50 0.68 0.62] maxCFF 0.179 0.525 (not both feasible) N 4.2471 4.65842
+PAIR NSB 22 A [0.80 1.25 0.94 1.01] B [1.50 0.33 1.35 0.82] maxCFF -0.427 0.36 (not both feasible) N 3.59353 4.46342
+PAIR NSB 23 A [1.10 0.64 0.74 1.52] B [0.90 1.48 0.46 1.17] maxCFF 0.753 0.442 (not both feasible) N 4.26317 4.21461
+PAIR NSB 24 A [1.72 0.45 1.44 0.39] B [1.17 0.96 0.70 1.18] maxCFF 0.798 -0.442 (not both feasible) N 5.09127 3.30257
+PAIR NSB 25 A [0.85 1.27 1.08 0.81] B [1.17 0.75 0.84 1.24] maxCFF -0.351 -0.114 mid -0.902 feasible N 3.79913 3.47426 mid 3.19952 delta -1.366e-01
+PAIR NSB 26 A [0.84 1.06 0.71 1.38] B [0.67 1.40 1.00 0.94] maxCFF 0.361 0.182 (not both feasible) N 3.74565 4.14259
+PAIR NSB 27 A [1.25 0.70 0.85 1.20] B [0.99 1.02 1.22 0.77] maxCFF -0.299 -0.264 mid -1.03 feasible N 3.49741 3.62745 mid 3.24653 delta -9.730e-02
+PAIR NSB 28 A [1.56 0.53 0.68 1.22] B [1.34 0.83 1.54 0.29] maxCFF 0.492 0.746 (not both feasible) N 4.40609 4.91733
+PAIR NSB 29 A [0.64 1.28 1.17 0.90] B [1.11 0.94 0.62 1.34] maxCFF -0.363 0.165 (not both feasible) N 4.04793 3.53779
+PAIR NSB 30 A [0.95 0.72 1.51 0.83] B [0.34 1.22 0.83 1.61] maxCFF 0.621 0.901 (not both feasible) N 4.36261 4.96027
+PAIR NSB 31 A [0.90 0.47 1.11 1.53] B [1.32 0.98 1.20 0.49] maxCFF 0.765 -0.32 (not both feasible) N 4.73604 4.04134
+PAIR NSB 32 A [0.81 1.21 1.10 0.88] B [1.52 0.61 0.76 1.11] maxCFF -0.6 0.43 (not both feasible) N 3.68947 4.19177
+PAIR NSB 33 A [1.09 1.32 0.43 1.17] B [1.24 0.58 0.74 1.44] maxCFF -0.046 0.562 (not both feasible) N 3.81647 4.11063
+PAIR NSB 34 A [1.38 1.00 0.57 1.05] B [0.57 0.97 1.04 1.41] maxCFF -0.125 0.525 (not both feasible) N 3.74526 4.34305
+PAIR NSB 35 A [0.34 1.09 1.68 0.89] B [1.00 0.65 1.00 1.34] maxCFF 0.903 0.323 (not both feasible) N 5.2796 3.89872
+PAIR NSB 36 A [0.59 1.28 0.60 1.54] B [0.99 1.11 1.13 0.77] maxCFF 0.785 -0.611 (not both feasible) N 4.53753 3.5393
+PAIR NSB 37 A [0.99 1.16 0.48 1.37] B [1.20 0.57 0.56 1.67] maxCFF 0.23 1.01 (not both feasible) N 3.68337 4.73456
+PAIR NSB 38 A [1.57 0.54 0.31 1.58] B [0.33 0.65 1.57 1.46] maxCFF 0.725 0.664 (not both feasible) N 4.92104 5.61753
+PAIR NSB 39 A [1.20 1.05 0.39 1.36] B [1.04 0.27 1.33 1.36] maxCFF 0.102 0.43 (not both feasible) N 3.66946 4.71883
+SUMMARY case NSB pairs A,B feasible 5/40 | midpoints feasible 5/5 (100 %) | objective violations 0/5 | median delta -4.928e-02 | feasible designs 26/80 | best feasible N 3.22964 vs best N 3.22964
+VERDICT case NSB set NON-DISCRIMINATING (5 < 10 pairs with A and B feasible) | objective SUPPORTED (<= 5 %)
+PRE case WNSB u=1 max CFF -0.3487 bar (below failure)
+EPS case WNSB N(dt 10) 3.877687246 N(dt 5) 3.873765916 eps 3.034e-03 (relative)
+PAIR WNSB  0 A [0.42 1.11 1.10 1.37] B [0.94 1.17 0.75 1.14] maxCFF 0.911 0.296 (not both feasible) N 5.43015 4.46097
+PAIR WNSB  1 A [0.54 0.79 1.54 1.12] B [1.02 1.01 1.04 0.93] maxCFF 1.14 -0.476 (not both feasible) N 5.18372 3.85584
+PAIR WNSB  2 A [1.33 1.11 0.36 1.19] B [0.87 1.35 1.01 0.77] maxCFF 0.461 0.563 (not both feasible) N 5.1853 4.56412
+PAIR WNSB  3 A [1.19 1.40 1.02 0.38] B [1.00 0.97 1.20 0.84] maxCFF 0.756 0.29 (not both feasible) N 5.20174 4.24239
+PAIR WNSB  4 A [1.05 1.42 0.26 1.28] B [1.32 0.53 0.60 1.55] maxCFF 0.765 1.43 (not both feasible) N 5.53876 5.54963
+PAIR WNSB  5 A [0.59 1.07 1.41 0.92] B [1.27 0.52 0.96 1.25] maxCFF 0.854 0.614 (not both feasible) N 5.08512 5.05006
+PAIR WNSB  6 A [1.23 0.31 0.79 1.67] B [1.29 1.17 0.30 1.24] maxCFF 1.45 0.607 (not both feasible) N 6.14248 5.37329
+PAIR WNSB  7 A [1.12 1.34 0.39 1.15] B [1.03 1.05 0.64 1.29] maxCFF 0.582 0.722 (not both feasible) N 5.08503 4.78011
+PAIR WNSB  8 A [1.06 0.97 1.37 0.61] B [0.50 1.33 1.66 0.50] maxCFF 0.809 1.65 (not both feasible) N 4.90969 5.67203
+PAIR WNSB  9 A [1.59 0.96 0.66 0.78] B [1.55 0.38 0.96 1.11] maxCFF 1.15 0.993 (not both feasible) N 4.59108 4.85981
+PAIR WNSB 10 A [1.11 0.97 1.46 0.46] B [0.54 0.66 1.31 1.48] maxCFF 1.02 1.16 (not both feasible) N 5.31474 5.83262
+PAIR WNSB 11 A [0.96 0.74 0.69 1.61] B [0.34 1.13 1.05 1.48] maxCFF 1.37 1.12 (not both feasible) N 5.46035 5.64173
+PAIR WNSB 12 A [0.85 1.50 0.72 0.93] B [0.27 1.06 1.61 1.06] maxCFF 0.928 1.21 (not both feasible) N 4.8239 5.65765
+PAIR WNSB 13 A [0.84 1.02 1.18 0.95] B [0.65 0.96 1.28 1.10] maxCFF 0.194 0.505 (not both feasible) N 4.29953 4.86133
+PAIR WNSB 14 A [1.58 0.75 0.43 1.25] B [0.56 1.58 0.42 1.44] maxCFF 1.11 1.18 (not both feasible) N 5.02396 5.66434
+PAIR WNSB 15 A [1.13 0.55 1.31 1.01] B [0.92 0.50 0.87 1.71] maxCFF 0.607 1.59 (not both feasible) N 4.81545 5.63516
+PAIR WNSB 16 A [1.36 0.49 0.95 1.20] B [1.29 0.73 0.76 1.22] maxCFF 0.492 0.537 (not both feasible) N 5.08751 4.88492
+PAIR WNSB 17 A [0.42 1.46 1.27 0.84] B [1.63 0.45 0.85 1.07] maxCFF 0.777 1.21 (not both feasible) N 5.36937 4.79979
+PAIR WNSB 18 A [1.01 0.61 1.31 1.06] B [1.15 0.94 0.99 0.92] maxCFF 0.597 -0.57 (not both feasible) N 4.7943 3.84949
+PAIR WNSB 19 A [1.38 0.60 0.31 1.70] B [0.80 1.22 1.38 0.60] maxCFF 1.94 0.828 (not both feasible) N 5.70609 5.28688
+PAIR WNSB 20 A [1.42 0.87 0.99 0.72] B [1.40 0.67 1.43 0.51] maxCFF 0.591 0.953 (not both feasible) N 4.52239 5.67697
+PAIR WNSB 21 A [1.02 1.38 1.03 0.57] B [1.19 1.50 0.68 0.62] maxCFF 0.674 0.983 (not both feasible) N 4.82154 5.29107
+PAIR WNSB 22 A [0.80 1.25 0.94 1.01] B [1.50 0.33 1.35 0.82] maxCFF 0.228 0.774 (not both feasible) N 4.362 5.473
+PAIR WNSB 23 A [1.10 0.64 0.74 1.52] B [0.90 1.48 0.46 1.17] maxCFF 1.23 0.879 (not both feasible) N 5.27815 5.12836
+PAIR WNSB 24 A [1.72 0.45 1.44 0.39] B [1.17 0.96 0.70 1.18] maxCFF 1.26 0.417 (not both feasible) N 5.85496 4.4796
+PAIR WNSB 25 A [0.85 1.27 1.08 0.81] B [1.17 0.75 0.84 1.24] maxCFF 0.301 0.605 (not both feasible) N 4.45249 4.68411
+PAIR WNSB 26 A [0.84 1.06 0.71 1.38] B [0.67 1.40 1.00 0.94] maxCFF 0.912 0.659 (not both feasible) N 4.94582 4.70767
+PAIR WNSB 27 A [1.25 0.70 0.85 1.20] B [0.99 1.02 1.22 0.77] maxCFF 0.469 0.393 (not both feasible) N 4.71697 4.38301
+PAIR WNSB 28 A [1.56 0.53 0.68 1.22] B [1.34 0.83 1.54 0.29] maxCFF 1.05 1.24 (not both feasible) N 4.99077 5.76848
+PAIR WNSB 29 A [0.64 1.28 1.17 0.90] B [1.11 0.94 0.62 1.34] maxCFF 0.297 0.837 (not both feasible) N 4.8103 4.90799
+PAIR WNSB 30 A [0.95 0.72 1.51 0.83] B [0.34 1.22 0.83 1.61] maxCFF 1.13 1.35 (not both feasible) N 4.89855 6.04155
+PAIR WNSB 31 A [0.90 0.47 1.11 1.53] B [1.32 0.98 1.20 0.49] maxCFF 1.29 0.381 (not both feasible) N 5.38879 4.95331
+PAIR WNSB 32 A [0.81 1.21 1.10 0.88] B [1.52 0.61 0.76 1.11] maxCFF 0.0654 0.901 (not both feasible) N 4.38632 4.80526
+PAIR WNSB 33 A [1.09 1.32 0.43 1.17] B [1.24 0.58 0.74 1.44] maxCFF 0.514 1.08 (not both feasible) N 5.05038 5.28902
+PAIR WNSB 34 A [1.38 1.00 0.57 1.05] B [0.57 0.97 1.04 1.41] maxCFF 0.476 0.995 (not both feasible) N 4.64251 5.31911
+PAIR WNSB 35 A [0.34 1.09 1.68 0.89] B [1.00 0.65 1.00 1.34] maxCFF 1.48 0.845 (not both feasible) N 5.37595 4.98576
+PAIR WNSB 36 A [0.59 1.28 0.60 1.54] B [0.99 1.11 1.13 0.77] maxCFF 1.4 0.0533 (not both feasible) N 5.50357 4.2116
+PAIR WNSB 37 A [0.99 1.16 0.48 1.37] B [1.20 0.57 0.56 1.67] maxCFF 0.917 1.55 (not both feasible) N 5.18204 5.70388
+PAIR WNSB 38 A [1.57 0.54 0.31 1.58] B [0.33 0.65 1.57 1.46] maxCFF 1.31 1.21 (not both feasible) N 6.27851 5.92727
+PAIR WNSB 39 A [1.20 1.05 0.39 1.36] B [1.04 0.27 1.33 1.36] maxCFF 0.875 0.894 (not both feasible) N 5.2645 5.81582
+SUMMARY case WNSB pairs A,B feasible 0/40 | midpoints feasible 0/0 (nan %) | objective violations 0/0 | median delta +nan | feasible designs 2/80 | best feasible N 3.84949 vs best N 3.84949
+VERDICT case WNSB set NON-DISCRIMINATING (0 < 10 pairs with A and B feasible) | objective NON-DISCRIMINATING (no pair with A, B, C feasible)
+H10FDONE

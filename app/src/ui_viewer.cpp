@@ -1,6 +1,7 @@
 // Result Viewer (ECLIPSE / OPM Flow binary + formatted output and ResSim runs: summary overlay, case comparison,
 // 3D INIT / restart properties), simulation-engine selection, OPM Flow settings, persistent settings file.
 #include "app.h"
+#include "i18n.h"
 #include "ecl_engine.h"
 #include "widgets.h"
 #include "implot.h"
@@ -9,9 +10,7 @@
 #include "theme.h"
 #include <chrono>
 #include <cfloat>
-#include <windows.h>
-#include <shellapi.h>
-#include <shlobj.h>
+#include "platform.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -39,18 +38,13 @@ bool catMatch(int cat, char c) {
     }
 }
 void openFolder(const std::string& dir) {
-    ShellExecuteW(nullptr, L"open", fs::u8path(dir).wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    plat::openPath(dir);
 }
 }
 
 // ============================================================================ settings file
 void App::loadSettings() {
-    wchar_t buf[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf))) {
-        fs::path d = fs::path(buf) / L"ResSimStudio";
-        std::error_code ec; fs::create_directories(d, ec);
-        settingsPath_ = (d / L"ressim_settings.ini").u8string();
-    } else settingsPath_ = "ressim_settings.ini";
+    settingsPath_ = (fs::u8path(plat::configDir()) / "ressim_settings.ini").u8string();
     std::ifstream f(fs::u8path(settingsPath_));
     std::string line;
     while (std::getline(f, line)) {
@@ -61,6 +55,14 @@ void App::loadSettings() {
         try {
             if (k == "ui_scale") settings_.uiScale = std::clamp(std::stof(v), 0.6f, 1.6f);
             else if (k == "engine") settings_.engine = std::clamp(std::stoi(v), 0, 2);
+            else if (k == "theme") settings_.theme = std::clamp(std::stoi(v), 0, 2);
+            else if (k == "accent") settings_.accent = std::clamp(std::stoi(v), 0, 4);
+            else if (k == "help_style") { settings_.helpStyle = std::clamp(std::stoi(v), 0, 1); ui::hintMode() = settings_.helpStyle; }
+            else if (k == "autosave") settings_.autosave = v != "0";
+            else if (k == "autosave_sec") settings_.autosaveSec = std::clamp(std::stoi(v), 15, 3600);
+            else if (k == "time_cursor") settings_.timeCursor = v != "0";
+            else if (k == "bg3d") { settings_.bg3d = std::clamp(std::stoi(v), 0, 4); set3dBackground(settings_.bg3d); }
+            else if (k == "language") { settings_.language = v; i18n::setLanguage(v); }
             else if (k == "ecl_path") settings_.eclPath = v;
             else if (k == "ecl_version") settings_.eclVersion = v;
             else if (k == "ecl_program") settings_.eclProgram = std::clamp(std::stoi(v), 0, 2);
@@ -72,7 +74,27 @@ void App::loadSettings() {
             else if (k == "opm_tuning") settings_.opmTuning = v == "1";
             else if (k == "opm_auto_view") settings_.opmAutoView = v != "0";
             else if (k == "opm_args") settings_.opmArgs = v;
+            else if (k == "python_exe") settings_.pythonExe = v;
             else if (k == "opm_keep_wells") settings_.opmKeepWells = v == "1";
+            else if (k == "rst_every") settings_.rstEvery = std::clamp(std::stoi(v), 0, 100000);
+            else if (k == "rst_last") settings_.rstLast = v != "0";
+            else if (k == "auto_save_results") settings_.autoSaveResults = v == "1";
+            else if (k == "ecl_output") settings_.eclOutput = v == "1";
+            else if (k == "mpi_enabled") settings_.mpiEnabled = v == "1";
+            else if (k == "mpi_exec") settings_.mpiExec = v;
+            else if (k == "mpi_procs") settings_.mpiProcs = std::clamp(std::stoi(v), 0, 4096);
+            else if (k == "mpi_args") settings_.mpiArgs = v;
+            else if (k == "mpi_jobdir") settings_.mpiJobDir = v;
+            else if (k == "gpu_enabled") settings_.gpuEnabled = v == "1";
+            else if (k == "gpu_prec") settings_.gpuPrec = v == "0" ? 0 : v == "2" ? 2 : 1;
+            else if (k == "mpi_dd") settings_.mpiDD = v == "1";
+            else if (k == "mpi_dd_procs") settings_.mpiDDProcs = std::clamp(std::stoi(v), 1, 4096);
+            else if (k == "mpi_da") settings_.mpiDistAsm = v == "1";
+            else if (k == "range_all_steps") settings_.rangeAllSteps = v == "1";
+            else if (k == "show_start") settings_.showStartPage = v != "0";
+            else if (k == "run_history") settings_.runHistory = v != "0";
+            else if (k == "run_history_max") settings_.runHistoryMax = std::clamp(std::stoi(v), 1, 50);
+            else if (k.rfind("recent", 0) == 0 && !v.empty() && settings_.recent.size() < 12) settings_.recent.push_back(v);
         } catch (...) {}
     }
 }
@@ -84,18 +106,44 @@ void App::saveSettings() {
     f << "# ResSim Studio settings\n";
     f << "ui_scale=" << settings_.uiScale << "\n";
     f << "engine=" << settings_.engine << "\n";
+    f << "theme=" << settings_.theme << "\naccent=" << settings_.accent << "\n";
+    f << "help_style=" << settings_.helpStyle << "\n";
+    f << "autosave=" << (settings_.autosave ? 1 : 0) << "\nautosave_sec=" << settings_.autosaveSec << "\n";
+    f << "time_cursor=" << (settings_.timeCursor ? 1 : 0) << "\n";
+    f << "bg3d=" << settings_.bg3d << "\n";
+    f << "language=" << settings_.language << "\n";
     f << "flow_path=" << settings_.flowPath << "\n";
     f << "opm_threads=" << settings_.opmThreads << "\n";
     f << "opm_max_dt=" << settings_.opmMaxDt << "\n";
     f << "opm_tuning=" << (settings_.opmTuning ? 1 : 0) << "\n";
     f << "opm_auto_view=" << (settings_.opmAutoView ? 1 : 0) << "\n";
     f << "opm_args=" << settings_.opmArgs << "\n";
+    f << "python_exe=" << settings_.pythonExe << "\n";
     f << "opm_keep_wells=" << (settings_.opmKeepWells ? 1 : 0) << "\n";
     f << "ecl_path=" << settings_.eclPath << "\n";
     f << "ecl_version=" << settings_.eclVersion << "\n";
     f << "ecl_program=" << settings_.eclProgram << "\n";
     f << "ecl_args=" << settings_.eclArgs << "\n";
     f << "deck_run_mode=" << settings_.deckRunMode << "\n";
+    f << "rst_every=" << settings_.rstEvery << "\n";
+    f << "rst_last=" << (settings_.rstLast ? 1 : 0) << "\n";
+    f << "auto_save_results=" << (settings_.autoSaveResults ? 1 : 0) << "\n";
+    f << "ecl_output=" << (settings_.eclOutput ? 1 : 0) << "\n";
+    f << "mpi_enabled=" << (settings_.mpiEnabled ? 1 : 0) << "\n";
+    f << "mpi_exec=" << settings_.mpiExec << "\n";
+    f << "mpi_procs=" << settings_.mpiProcs << "\n";
+    f << "mpi_args=" << settings_.mpiArgs << "\n";
+    f << "mpi_jobdir=" << settings_.mpiJobDir << "\n";
+    f << "gpu_enabled=" << (settings_.gpuEnabled ? 1 : 0) << "\n";
+    f << "gpu_prec=" << settings_.gpuPrec << "\n";
+    f << "mpi_dd=" << (settings_.mpiDD ? 1 : 0) << "\n";
+    f << "mpi_dd_procs=" << settings_.mpiDDProcs << "\n";
+    f << "mpi_da=" << (settings_.mpiDistAsm ? 1 : 0) << "\n";
+    f << "range_all_steps=" << (settings_.rangeAllSteps ? 1 : 0) << "\n";
+    f << "show_start=" << (settings_.showStartPage ? 1 : 0) << "\n";
+    f << "run_history=" << (settings_.runHistory ? 1 : 0) << "\n";
+    f << "run_history_max=" << settings_.runHistoryMax << "\n";
+    for (size_t i = 0; i < settings_.recent.size(); ++i) f << "recent" << i << "=" << settings_.recent[i] << "\n";
 }
 
 void App::detectEclipse(bool force) {
@@ -134,17 +182,57 @@ void App::opmSettingsWindow() {
         }
         ImGui::NewLine();
         ui::hint("Smaller sizes fit more panels and wider layouts on the screen. Shortcuts: Ctrl + / Ctrl - / Ctrl 0.");
+        {   // C39 appearance
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+            if (ImGui::Combo("Theme", &settings_.theme, themeNames(), 3)) { applyColors(settings_.theme, settings_.accent); ch = true; }
+            ImGui::SameLine(0, ImGui::GetFontSize() * 1.5f);
+            ImGui::TextUnformatted("Accent");
+            for (int a = 0; a < 5; ++a) {
+                ImGui::SameLine();
+                const ImVec4 col = accentColor(a);
+                ImGui::PushID(a);
+                if (ImGui::ColorButton(accentNames()[a], col, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                                       ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) { settings_.accent = a; applyColors(settings_.theme, a); ch = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", accentNames()[a]);
+                if (a == settings_.accent) ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_Text), 4.0f, 0, 2.0f);
+                ImGui::PopID();
+            }
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+            if (ImGui::Combo("Help text", &settings_.helpStyle, "Compact (i) icons\0Inline text\0")) { ui::hintMode() = settings_.helpStyle; ch = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("Compact: explanations sit behind an (i) icon - hover to read, click to pin. Inline: the explanations are printed under the controls."));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+            if (ImGui::Combo("3-D background", &settings_.bg3d, background3dNames(), 5)) { set3dBackground(settings_.bg3d); ch = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("Model and Results 3-D views (the Geomodel 3-D scene has its own colour in its View panel)"));
+            ch |= ImGui::Checkbox(TRL("Report-time cursor on all time plots (drag it to change the report step)"), &settings_.timeCursor);
+            ch |= ImGui::Checkbox(TRL("Autosave a recovery copy of unsaved changes"), &settings_.autosave);
+            if (settings_.autosave) {
+                ImGui::SameLine(); ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+                if (ImGui::InputInt("s##autosave", &settings_.autosaveSec, 15, 60)) { settings_.autosaveSec = std::clamp(settings_.autosaveSec, 15, 3600); ch = true; }
+            }
+            ui::hint("Undo / redo of every model edit: Ctrl+Z / Ctrl+Y (Edit menu). The recovery copy is offered at the next start "
+                     "if the program did not close normally.");
+        }
+        ch |= ImGui::Checkbox(TRL("Start page at start-up"), &settings_.showStartPage);
+        ch |= ImGui::Checkbox(TRL("Keep every finished run for comparison (run history)"), &settings_.runHistory);
+        if (settings_.runHistory) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+            if (ImGui::InputInt("runs kept", &settings_.runHistoryMax)) { settings_.runHistoryMax = std::clamp(settings_.runHistoryMax, 1, 50); ch = true; }
+        }
+        ui::hint("Run history: Results > Cases, vectors & compare lists the last runs with what changed in the inputs (hover a run). "
+                 "Command palette: Ctrl+Shift+P or Ctrl+K.");
     }
+    restartSettingsUi(ch);
+    hpcSettingsUi(ch);
     ui::header("Engine used by Run (F5)");
-    ch |= ImGui::RadioButton("ResSim (built-in, fully implicit black oil)", &settings_.engine, 0);
-    ch |= ImGui::RadioButton("OPM Flow (external, open-source flow.exe)", &settings_.engine, 1);
-    if (ImGui::RadioButton("ECLIPSE (external, licensed Schlumberger installation)", &settings_.engine, 2)) { ch = true; detectEclipse(false); }
+    ch |= ImGui::RadioButton(TRL("ResSim (built-in, fully implicit black oil)"), &settings_.engine, 0);
+    ch |= ImGui::RadioButton(TRL("OPM Flow (external, open-source flow.exe)"), &settings_.engine, 1);
+    if (ImGui::RadioButton(TRL("ECLIPSE (external, licensed Schlumberger installation)"), &settings_.engine, 2)) { ch = true; detectEclipse(false); }
     ui::hint("With an external engine, ResSim exports the case as an ECLIPSE deck, runs the simulator with live progress and "
              "reads the EGRID / INIT / UNRST / SMSPEC results back into the plots, the 3D viewer and the Result Viewer.");
     if (settings_.engine != 0) {
         ui::header("Imported decks");
-        ch |= ImGui::RadioButton("Run the original deck file while it is not edited in ResSim (recommended)", &settings_.deckRunMode, 0);
-        ch |= ImGui::RadioButton("Always run the deck generated from the model", &settings_.deckRunMode, 1);
+        ch |= ImGui::RadioButton(TRL("Run the original deck file while it is not edited in ResSim (recommended)"), &settings_.deckRunMode, 0);
+        ch |= ImGui::RadioButton(TRL("Always run the deck generated from the model"), &settings_.deckRunMode, 1);
         ui::hint("The original deck (with all INCLUDE files, groups, VFP, MSW, ACTIONX, UDQ ...) runs exactly as written, so every "
                  "feature of OPM Flow / ECLIPSE is available. After an edit in ResSim the model is exported as a new deck.");
         if (!srcDeck_.empty())
@@ -156,10 +244,10 @@ void App::opmSettingsWindow() {
         ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 11);
         if (ui::inputString("##eclpath", &settings_.eclPath)) { ch = true; eclDetectDone_ = false; }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("eclrun.exe (recommended: picks the version and the licence settings), eclipse.exe / e300.exe, or the \n"
-                              "installation folder (e.g. C:\\ecl). Empty = automatic detection.");
+            ImGui::SetTooltip("%s", TR("eclrun.exe (recommended: picks the version and the licence settings), eclipse.exe / e300.exe, or the \n"
+                              "installation folder (e.g. C:\\ecl). Empty = automatic detection."));
         ImGui::SameLine();
-        if (ImGui::Button("Browse...##ecl")) {
+        if (ImGui::Button(TRL("Browse...##ecl"))) {
             std::string p = settings_.eclPath;
             if (fileDialog(false, "ECLIPSE (eclrun.exe, eclipse.exe, e300.exe)\0eclrun*.exe;eclipse*.exe;e300*.exe\0Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0",
                            "exe", p)) {
@@ -167,7 +255,7 @@ void App::opmSettingsWindow() {
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Detect##ecl")) detectEclipse(true);
+        if (ImGui::Button(TRL("Detect##ecl"))) detectEclipse(true);
         if (eclDetected_.empty()) {
             ImGui::TextColored(col4(Pal::Warn), "ECLIPSE not found.");
             ui::hint("ResSim does not include ECLIPSE: a licensed installation is needed. Searched: the path above, %ECLIPSE_EXE%, "
@@ -193,7 +281,7 @@ void App::opmSettingsWindow() {
             const bool launcher = isEclrunLauncher(eclDetected_);
             ImGui::BeginDisabled(!launcher);
             if (ImGui::BeginCombo("##eclver", settings_.eclVersion.empty() ? "latest installed" : settings_.eclVersion.c_str())) {
-                if (ImGui::Selectable("latest installed", settings_.eclVersion.empty())) { settings_.eclVersion.clear(); ch = true; }
+                if (ImGui::Selectable(TRL("latest installed"), settings_.eclVersion.empty())) { settings_.eclVersion.clear(); ch = true; }
                 for (auto& v : eclVersions_)
                     if (ImGui::Selectable(v.c_str(), settings_.eclVersion == v)) { settings_.eclVersion = v; ch = true; }
                 ImGui::EndCombo();
@@ -208,7 +296,7 @@ void App::opmSettingsWindow() {
         }
         const std::string edir = runDirFor(path_, case_.title, "ECL");
         ImGui::TextDisabled("Run folder: %s", edir.c_str());
-        if (ImGui::SmallButton("Open run folder##ecl")) { std::error_code ec; fs::create_directories(fs::u8path(edir), ec); openFolder(edir); }
+        if (ImGui::SmallButton(TRL("Open run folder##ecl"))) { std::error_code ec; fs::create_directories(fs::u8path(edir), ec); openFolder(edir); }
         if (ch) saveSettings();
         ImGui::End();
         return;
@@ -217,16 +305,16 @@ void App::opmSettingsWindow() {
     ui::header("OPM Flow executable");
     ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 11);
     if (ui::inputString("##flowpath", &settings_.flowPath)) { ch = true; flowDetectDone_ = false; }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("flow.exe / flow_blackoil.exe, or its folder. Empty = automatic detection.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("flow.exe / flow_blackoil.exe, or its folder. Empty = automatic detection."));
     ImGui::SameLine();
-    if (ImGui::Button("Browse...")) {
+    if (ImGui::Button(TRL("Browse..."))) {
         std::string p = settings_.flowPath;
         if (fileDialog(false, "OPM Flow (flow*.exe)\0flow*.exe\0Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0", "exe", p)) {
             settings_.flowPath = p; ch = true; detectFlow(true);
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Detect")) detectFlow(true);
+    if (ImGui::Button(TRL("Detect"))) detectFlow(true);
     if (flowDetected_.empty()) {
         ImGui::TextColored(col4(Pal::Warn), "OPM Flow not found.");
         ui::hint("Install OPM Flow for Windows (installer: Program Files\\OPM Flow\\bin\\flow.exe, or unzip the portable package) "
@@ -259,14 +347,14 @@ void App::opmSettingsWindow() {
     }
     const std::string dir = runDirFor(path_, case_.title);
     ImGui::TextDisabled("Run folder: %s", dir.c_str());
-    if (ImGui::SmallButton("Open run folder")) { std::error_code ec; fs::create_directories(fs::u8path(dir), ec); openFolder(dir); }
+    if (ImGui::SmallButton(TRL("Open run folder"))) { std::error_code ec; fs::create_directories(fs::u8path(dir), ec); openFolder(dir); }
     const auto notes = opmCompatibilityNotes(case_);
     if (!notes.empty()) {
         ui::header("Notes for the current case");
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 42);
         for (auto& n : notes) ImGui::TextColored(col4(Pal::Warn), "\xE2\x80\xA2 %s", n.c_str());
         ImGui::PopTextWrapPos();
-        if (!case_.grid.cornerPoint() && !case_.grid.newtran && ImGui::Button("Use geometric transmissibility (NEWTRAN) for this case")) {
+        if (!case_.grid.cornerPoint() && !case_.grid.newtran && ImGui::Button(TRL("Use geometric transmissibility (NEWTRAN) for this case"))) {
             case_.grid.newtran = true; markDirty(true);
         }
     }
@@ -331,6 +419,7 @@ void App::rvAddRun() {
             c.snaps = R.snaps;
             c.input = std::make_shared<ressim::Case>(R.input);
             c.sim = R.sim;
+            c.egs.fracNames = R.fracNames; c.egs.fracSegs = R.fracSegs; c.egs.fracSnap = R.fracSnap;
             title = R.input.title.substr(0, 40);
         }
     }
@@ -360,21 +449,21 @@ void App::rvBody() {
     const float fs = ImGui::GetFontSize();
     // ---------------- left: cases + vector tree
     ImGui::BeginChild("rvleft", ImVec2(fs * 19, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
-    if (ImGui::Button("Open results...")) {
+    if (ImGui::Button(TRL("Open results..."))) {
         std::string p;
         if (fileDialog(false, "ECLIPSE / OPM Flow results\0*.SMSPEC;*.FSMSPEC;*.EGRID;*.FEGRID;*.UNRST;*.FUNRST;*.INIT;*.FINIT;*.UNSMRY;*.FUNSMRY;*.DATA;*.data\0All files (*.*)\0*.*\0", "SMSPEC", p))
             rvOpen(p);
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Any file of a case (CASE.DATA, .SMSPEC, .EGRID, .UNRST, formatted .F* files): the\nother files of the same case are found automatically.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("Any file of a case (CASE.DATA, .SMSPEC, .EGRID, .UNRST, formatted .F* files): the\nother files of the same case are found automatically."));
     ImGui::SameLine();
-    if (ImGui::Button("+ Current run")) rvAddRun();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add the results of the last Run (ResSim or OPM Flow) as a case");
+    if (ImGui::Button(TRL("+ Current run"))) rvAddRun();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("Add the results of the last Run (ResSim or OPM Flow) as a case"));
     ui::header("Cases");
     int remove = -1;
     for (int i = 0; i < int(rv_.cases.size()); ++i) {
         RVCase& c = rv_.cases[size_t(i)];
         ImGui::PushID(i);
-        ImGui::Checkbox("##show", &c.show);
+        ImGui::Checkbox(TRL("##show"), &c.show);
         ImGui::SameLine();
         ImVec4 col = col4(c.color);
         ImGui::ColorEdit4("##col", &col.x, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
@@ -385,16 +474,23 @@ void App::rvBody() {
             ImGui::BeginTooltip();
             ImGui::Text("%s", c.internal ? "ResSim run (in memory)" : c.path.c_str());
             ImGui::Text("%zu vectors, %zu time steps", c.sum().vars.size(), c.sum().time.size());
+            if (!c.changes.empty()) {
+                ImGui::Separator();
+                ImGui::TextDisabled("%s", TR("Changes against the previous run:"));
+                if (g_fonts.mono) ImGui::PushFont(g_fonts.mono, 0.0f);
+                ImGui::TextUnformatted(c.changes.c_str());
+                if (g_fonts.mono) ImGui::PopFont();
+            }
             ImGui::EndTooltip();
         }
         if (ImGui::BeginPopupContextItem("ctx")) {
-            if (!c.internal && ImGui::MenuItem("Reload")) {
+            if (!c.internal && ImGui::MenuItem(TRL("Reload"))) {
                 const auto& F = c.rc->files;
                 std::string p = !F.smspec.empty() ? F.smspec : !F.egrid.empty() ? F.egrid : !F.restart.empty() ? F.restart[0] : F.init;
                 rvDeferred_ = [this, p] { rvOpen(p); };
             }
-            if (!c.internal && ImGui::MenuItem("Open folder")) openFolder(fs::u8path(c.path).parent_path().u8string());
-            if (ImGui::MenuItem("Remove")) remove = i;
+            if (!c.internal && ImGui::MenuItem(TRL("Open folder"))) openFolder(fs::u8path(c.path).parent_path().u8string());
+            if (ImGui::MenuItem(TRL("Remove"))) remove = i;
             ImGui::EndPopup();
         }
         ImGui::PopID();
@@ -456,7 +552,7 @@ void App::rvBody() {
     if (ImGui::BeginTabBar("rvtabs")) {
         auto tab = [&](const char* name, int id) {
             ImGuiTabItemFlags fl = rv_.wantTab == id ? ImGuiTabItemFlags_SetSelected : 0;
-            const bool open = ImGui::BeginTabItem(name, nullptr, fl);
+            const bool open = ui::tabItem(name, nullptr, fl);
             if (open) rv_.tab = id;
             return open;
         };
@@ -473,15 +569,15 @@ void App::rvBody() {
 // ---------------------------------------------------------------------------- plots
 void App::rvPlots() {
     const float fs = ImGui::GetFontSize();
-    ImGui::Checkbox("Years", &rv_.years);
-    ImGui::SameLine(); ImGui::Checkbox("One plot per vector", &rv_.perVector);
+    ImGui::Checkbox(TRL("Years"), &rv_.years);
+    ImGui::SameLine(); ImGui::Checkbox(TRL("One plot per vector"), &rv_.perVector);
     ImGui::SameLine();
     static const char* colorModes[] = {"Colours: auto", "Colours: by case", "Colours: by vector", "Colours: every curve"};
     ImGui::SetNextItemWidth(fs * 9.5f);
     ImGui::Combo("##colmode", &rv_.colorMode, colorModes, 4);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-        ImGui::SetTooltip("auto: one plot per vector -> one colour per case (one case: per vector); all in one plot -> every curve\n"
-                          "gets its own colour. Palette: Results toolbar.");
+        ImGui::SetTooltip("%s", TR("auto: one plot per vector -> one colour per case (one case: per vector); all in one plot -> every curve\n"
+                          "gets its own colour. Palette: Results toolbar."));
     if (rv_.perVector) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(fs * 6.5f);
@@ -489,7 +585,7 @@ void App::rvPlots() {
         ImGui::Combo("##cols", &rv_.gridCols, colsItems, 5);
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Clear selection")) rv_.selected.clear();
+    if (ImGui::SmallButton(TRL("Clear selection"))) rv_.selected.clear();
     ImGui::SameLine();
     ImGui::TextDisabled("%zu vector(s)", rv_.selected.size());
     ImGui::SameLine();
@@ -532,7 +628,14 @@ void App::rvPlots() {
         }
     };
     auto unitOfKey = [&](const std::string& key) -> std::string {
-        for (auto& c : rv_.cases) { int v = c.sum().find(key); if (v >= 0) return c.sum().vars[size_t(v)].unit; }
+        // shown cases first (a hidden case with other units - e.g. a METRIC ECLIPSE run next to a FIELD case - must
+        // not label the axis), then any case that has the vector
+        for (int pass = 0; pass < 2; ++pass)
+            for (auto& c : rv_.cases) {
+                if (pass == 0 && !c.show) continue;
+                const int v = c.sum().find(key);
+                if (v >= 0 && !c.sum().vars[size_t(v)].unit.empty()) return c.sum().vars[size_t(v)].unit;
+            }
         return {};
     };
     const ImPlotAxisFlags af = ImPlotAxisFlags_AutoFit;
@@ -601,8 +704,8 @@ void App::rvCompare() {
     ImGui::SameLine(); ImGui::TextUnformatted("vs"); ImGui::SameLine(); combo("##cmp", &rv_.cmp);
     ImGui::SameLine();
     bool redo = rv_.cmpRef != rv_.ref || rv_.cmpCmp != rv_.cmp;
-    if (ImGui::Button("Swap")) { std::swap(rv_.ref, rv_.cmp); redo = true; }
-    ImGui::SameLine(); redo |= ImGui::Checkbox("Field only", &rv_.cmpFieldOnly);
+    if (ImGui::Button(TRL("Swap"))) { std::swap(rv_.ref, rv_.cmp); redo = true; }
+    ImGui::SameLine(); redo |= ImGui::Checkbox(TRL("Field only"), &rv_.cmpFieldOnly);
     if (redo && rv_.ref != rv_.cmp) {
         rv_.diffs = ecl::compareSummaries(rv_.cases[size_t(rv_.ref)].sum(), rv_.cases[size_t(rv_.cmp)].sum());
         if (rv_.cmpFieldOnly) rv_.diffs.erase(std::remove_if(rv_.diffs.begin(), rv_.diffs.end(), [](const ecl::VectorDiff& d) { return d.key.find(':') != std::string::npos; }), rv_.diffs.end());
@@ -617,7 +720,7 @@ void App::rvCompare() {
     if (!worstKey.empty())
         ImGui::TextColored(col4(worst < 0.02 ? Pal::Ok : worst < 0.05 ? Pal::Warn : Pal::Err), "worst field rate/pressure: %s %.2f %%", worstKey.c_str(), worst * 100);
     ImGui::SameLine();
-    if (ImGui::SmallButton("Copy CSV")) {
+    if (ImGui::SmallButton(TRL("Copy CSV"))) {
         std::ostringstream o;
         o << "key,reference_final,compared_final,max_abs_diff,rms_diff,rel_rms_percent,samples\n";
         for (auto& d : rv_.diffs) o << d.key << ',' << d.refFinal << ',' << d.cmpFinal << ',' << d.maxAbs << ',' << d.rms << ',' << d.relRms * 100 << ',' << d.samples << "\n";
@@ -627,14 +730,14 @@ void App::rvCompare() {
     ImGui::TextDisabled("%zu common vectors, sampled at the reference report times. relRMS = RMS(difference) / max |reference|. Click a row to plot it.", rv_.diffs.size());
     const ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable |
                                ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp;
-    if (ImGui::BeginTable("cmp", 6, tf)) {
+    if (ui::beginTable("cmp", 6, tf)) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Vector", ImGuiTableColumnFlags_DefaultSort, 1.6f);
-        ImGui::TableSetupColumn("Reference final", 0, 1.0f);
-        ImGui::TableSetupColumn("Compared final", 0, 1.0f);
-        ImGui::TableSetupColumn("Max |diff|", 0, 1.0f);
-        ImGui::TableSetupColumn("relRMS %", ImGuiTableColumnFlags_PreferSortDescending, 0.8f);
-        ImGui::TableSetupColumn("Samples", 0, 0.6f);
+        ui::tableColumn("Vector", ImGuiTableColumnFlags_DefaultSort, 1.6f);
+        ui::tableColumn("Reference final", 0, 1.0f);
+        ui::tableColumn("Compared final", 0, 1.0f);
+        ui::tableColumn("Max |diff|", 0, 1.0f);
+        ui::tableColumn("relRMS %", ImGuiTableColumnFlags_PreferSortDescending, 0.8f);
+        ui::tableColumn("Samples", 0, 0.6f);
         ImGui::TableHeadersRow();
         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
             if (ss->SpecsDirty && ss->SpecsCount > 0) {
@@ -674,7 +777,7 @@ void App::rvCompare() {
                 ImGui::TextColored(col4(d.relRms < 0.02 ? Pal::Ok : d.relRms < 0.05 ? Pal::Warn : Pal::Err), "%.2f", d.relRms * 100);
                 ImGui::TableSetColumnIndex(5); ImGui::Text("%d", d.samples);
             }
-        ImGui::EndTable();
+        ui::endTable();
     }
 }
 
@@ -813,6 +916,13 @@ void App::rvUpdateStreamlines(RVCase& c, int step) {
     sl.builtFocus = fkey;
 }
 
+// C30: a restart array of an external case, or its post-processed geomechanics array
+std::vector<float> App::rvLoad(RVCase& c, int step, const std::string& name) {
+    if (step >= 0 && size_t(step) < c.post.size())
+        for (const auto& e : c.post[size_t(step)].extra) if (e.first == name) return e.second;
+    return c.rc ? c.rc->restart.load(step, name) : std::vector<float>{};
+}
+
 // ---------------------------------------------------------------------------- 3D
 void App::rv3D() {
     const float fs = ImGui::GetFontSize();
@@ -836,23 +946,38 @@ void App::rv3D() {
     if (c.rc) {
         statics = c.rc->initArrays;
         if (c.rc->hasRestart) { nsteps = int(c.rc->restart.steps().size()); if (nsteps) dyn = c.rc->restart.arrayNames(std::min(rv_.step, nsteps - 1)); }
+        if (nsteps && !c.post.empty()) for (const auto& e : c.post[size_t(std::min(int(c.post.size()) - 1, std::min(rv_.step, nsteps - 1)))].extra) dyn.push_back(e.first);   // C30
     } else {
         nsteps = int(c.snaps.size());
-        if (nsteps) { dyn = {"PRESSURE", "SWAT", "SOIL", "SGAS", "RS"}; if (!c.snaps.front().rv.empty()) dyn.push_back("RV"); if (!c.snaps.front().poly.empty()) { dyn.push_back("POLYMER"); dyn.push_back("PADS"); } }
+        if (nsteps) { dyn = {"PRESSURE", "SWAT", "SOIL", "SGAS", "RS"}; if (!c.snaps.front().rv.empty()) dyn.push_back("RV"); if (!c.snaps.front().poly.empty()) { dyn.push_back("POLYMER"); dyn.push_back("PADS"); } if (!c.snaps.front().xco2.empty()) dyn.push_back("XCO2"); for (const auto& e : c.snaps.back().extra) dyn.push_back(e.first); }
         statics = {"DEPTH", "PORV"};
     }
     if (c.sim && nsteps > 0) { dyn.push_back("TOF"); dyn.push_back("DRAINAGE"); dyn.push_back("SWEEP"); }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(fs * 11);
     if (ImGui::BeginCombo("##p3d", rv_.prop.c_str(), ImGuiComboFlags_HeightLarge)) {
-        if (!statics.empty()) ImGui::SeparatorText("Static (INIT)");
+        if (!statics.empty()) ImGui::SeparatorText(TR("Static (INIT)"));
         for (auto& s : statics) if (ImGui::Selectable(("INIT " + s).c_str(), rv_.prop == "INIT " + s)) { rv_.prop = "INIT " + s; rv_.autoRange = true; }
-        if (!dyn.empty()) ImGui::SeparatorText("Dynamic (restart)");
+        if (!dyn.empty()) ImGui::SeparatorText(TR("Dynamic (restart)"));
         for (auto& s : dyn) {
-            if (s == "TOF") ImGui::SeparatorText("Streamline (traced)");
+            if (s == "TOF") ImGui::SeparatorText(TR("Streamline (traced)"));
             if (ImGui::Selectable(s.c_str(), rv_.prop == s)) { rv_.prop = s; rv_.autoRange = true; }
         }
         ImGui::EndCombo();
+    }
+    if (nsteps > 0) {   // C30: post-processed FE geomechanics of this case (ECLIPSE / OPM restart or ResSim run)
+        ImGui::SameLine();
+        if (ImGui::Button(TRL(ICON_LAYERS " Geomechanics##rvgeo"))) ImGui::OpenPopup("rvgeo");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("Compute stress / strain / displacement / failure maps of this case from its pressure (and\n"
+                                                      "temperature) changes - one-way FE post-processing, any engine"));
+        if (ImGui::BeginPopup("rvgeo")) {
+            std::shared_ptr<const Grid> gg = c.rc ? std::shared_ptr<const Grid>(c.rc->grid) : c.grid;
+            const bool fu = c.rc ? c.rc->unitSystem == 2 : (c.input && c.input->units == UnitSystem::Field);
+            ImGui::PushItemWidth(fs * 10);
+            postGeoControls(1, gg, fu, nullptr);
+            ImGui::PopItemWidth();
+            ImGui::EndPopup();
+        }
     }
     const bool isStatic = rv_.prop.rfind("INIT ", 0) == 0;
     const bool slProp = rv_.prop == "TOF" || rv_.prop == "DRAINAGE" || rv_.prop == "SWEEP";
@@ -886,8 +1011,21 @@ void App::rv3D() {
             if (rv_.view.settings().focusWell >= int(rv_.view.wells().size())) rv_.view.settings().focusWell = -1;
         }
     }
+    {   // C13: EDFM fracture planes (run segments coloured by the fracture value of the property, else input planes)
+        const std::string pn = isStatic ? std::string() : rv_.prop;
+        char fk[256];
+        std::snprintf(fk, sizeof(fk), "%p|%p|%d|%s|%g|%g|%d", (const void*)g, (const void*)c.input.get(), rv_.step, pn.c_str(), double(rv_.rmin),
+                      double(rv_.rmax), rv_.autoRange ? 1 : 0);
+        if (fracKeyRv_ != fk) {
+            fracKeyRv_ = fk;
+            const bool seg = !c.rc && !c.egs.fracSegs.empty() && c.egs.fracSnap.size() == c.snaps.size();
+            if (c.input && g) rv_.view.setPanels(fracturePanels(*c.input, g, seg ? &c.egs : nullptr, rv_.step, pn));
+            else rv_.view.setPanels({});
+        }
+    }
     ViewerBinding vb;
     vb.view = &rv_.view; vb.autoRange = &rv_.autoRange; vb.rmin = &rv_.rmin; vb.rmax = &rv_.rmax; vb.sl = &rv_.sl;
+    if (!isStatic && nsteps > 1 && !slProp) vb.rangeAllSteps = &settings_.rangeAllSteps;
     vb.id = "results"; vb.propName = isStatic ? rv_.prop.substr(5) : rv_.prop; vb.grid = g;
     vb.pngName = c.name + "_" + vb.propName;
     vb.slAvailable = c.sim != nullptr && nsteps > 0;
@@ -900,13 +1038,13 @@ void App::rv3D() {
         vb.cellHistory = [this, &c, nsteps](int cell, std::vector<double>& t, std::vector<double>& v) {
             for (int s = 0; s < nsteps; ++s) {
                 if (c.rc) {
-                    const std::vector<float> a = c.rc->restart.load(s, rv_.prop);
+                    const std::vector<float> a = rvLoad(c, s, rv_.prop);
                     if (size_t(cell) >= a.size()) continue;
                     t.push_back(c.rc->restart.steps()[size_t(s)].days); v.push_back(a[size_t(cell)]);
                 } else {
                     const Snapshot& sn = c.snaps[size_t(s)];
                     const std::string& p = rv_.prop;
-                    const std::vector<float>& a = p == "PRESSURE" ? sn.pressure : p == "SWAT" ? sn.sw : p == "SOIL" ? sn.so : p == "SGAS" ? sn.sg : p == "RV" ? sn.rv : p == "POLYMER" ? sn.poly : p == "PADS" ? sn.polyAds : sn.rs;
+                    const std::vector<float>& a = sn.field(p);
                     if (size_t(cell) >= a.size()) continue;
                     t.push_back(sn.time); v.push_back(a[size_t(cell)]);
                 }
@@ -919,7 +1057,7 @@ void App::rv3D() {
 
     // (re)load values when case / property / step / range change
     char kb[256];
-    std::snprintf(kb, sizeof(kb), "%p|%s|%d|%d|%g|%g|%d", (const void*)g, rv_.prop.c_str(), isStatic ? -1 : rv_.step, rv_.autoRange ? 1 : 0, rv_.rmin, rv_.rmax, rv_.view.settings().logScale ? 1 : 0);
+    std::snprintf(kb, sizeof(kb), "%p|%s|%d|%d|%g|%g|%d|%d", (const void*)g, rv_.prop.c_str(), isStatic ? -1 : rv_.step, rv_.autoRange ? 1 : 0, rv_.rmin, rv_.rmax, rv_.view.settings().logScale ? 1 : 0, settings_.rangeAllSteps ? 1 : 0);
     if (rv_.key3d != kb) {
         if (g != rv_.grid3d) { rv_.view.setGrid(g); rv_.grid3d = g; rv_.view.resetCamera(); }
         std::vector<float> v;
@@ -940,7 +1078,7 @@ void App::rv3D() {
             units = rv_.prop == "TOF" ? "days" : "well index";
         } else if (c.rc) {
             if (isStatic) v = c.rc->initArray(rv_.prop.substr(5));
-            else if (nsteps > 0) v = c.rc->restart.load(rv_.step, rv_.prop);
+            else if (nsteps > 0) v = rvLoad(c, rv_.step, rv_.prop);
         } else {
             if (isStatic) {
                 const std::string n = rv_.prop.substr(5);
@@ -948,19 +1086,34 @@ void App::rv3D() {
                 for (int a = 0; a < g->numActive(); ++a) v[size_t(a)] = float(n == "DEPTH" ? g->depth[size_t(a)] : g->poreVolRef[size_t(a)]);
             } else if (nsteps > 0) {
                 const Snapshot& s = c.snaps[size_t(rv_.step)];
-                v = rv_.prop == "PRESSURE" ? s.pressure : rv_.prop == "SWAT" ? s.sw : rv_.prop == "SOIL" ? s.so : rv_.prop == "SGAS" ? s.sg : rv_.prop == "RV" ? s.rv : rv_.prop == "POLYMER" ? s.poly : rv_.prop == "PADS" ? s.polyAds : s.rs;
+                v = s.field(rv_.prop);
             }
         }
         if (v.size() != size_t(g->numActive())) v.assign(size_t(g->numActive()), NAN);
         if (rv_.autoRange) {
             float lo = FLT_MAX, hi = -FLT_MAX;
             for (float x : v) if (std::isfinite(x)) { lo = std::min(lo, x); hi = std::max(hi, x); }
+            // C18.1: one colour scale over every report step (cached per case + property; ECLIPSE / OPM restart steps are read once)
+            if (!isStatic && !slProp && nsteps > 1 && settings_.rangeAllSteps) {
+                char gk[200];
+                std::snprintf(gk, sizeof(gk), "%p|%s|%d", (const void*)&c, rv_.prop.c_str(), nsteps);
+                if (rv_.grKey != gk) {
+                    float glo = FLT_MAX, ghi = -FLT_MAX;
+                    auto acc = [&](const std::vector<float>& a) { for (float x : a) if (std::isfinite(x)) { glo = std::min(glo, x); ghi = std::max(ghi, x); } };
+                    for (int s = 0; s < nsteps; ++s) {
+                        if (c.rc) { try { acc(rvLoad(c, s, rv_.prop)); } catch (...) {} }
+                        else acc(c.snaps[size_t(s)].field(rv_.prop));
+                    }
+                    rv_.grKey = gk; rv_.grLo = glo; rv_.grHi = ghi; rv_.grOk = glo <= ghi;
+                }
+                if (rv_.grOk) { lo = rv_.grLo; hi = rv_.grHi; }
+            }
             if (lo > hi) { lo = 0; hi = 1; }
             if (rv_.prop == "SWAT" || rv_.prop == "SOIL" || rv_.prop == "SGAS") { lo = 0; hi = 1; }
             if (hi - lo < 1e-12f) hi = lo + 1e-6f;
             rv_.rmin = lo; rv_.rmax = hi;
         }
-        std::snprintf(kb, sizeof(kb), "%p|%s|%d|%d|%g|%g|%d", (const void*)g, rv_.prop.c_str(), isStatic ? -1 : rv_.step, rv_.autoRange ? 1 : 0, rv_.rmin, rv_.rmax, rv_.view.settings().logScale ? 1 : 0);
+        std::snprintf(kb, sizeof(kb), "%p|%s|%d|%d|%g|%g|%d|%d", (const void*)g, rv_.prop.c_str(), isStatic ? -1 : rv_.step, rv_.autoRange ? 1 : 0, rv_.rmin, rv_.rmax, rv_.view.settings().logScale ? 1 : 0, settings_.rangeAllSteps ? 1 : 0);
         rv_.key3d = (slProp && !(rv_.sl.res && rv_.sl.snap == rv_.step)) ? std::string() : std::string(kb);
         rv_.vals = v;
         rv_.view.setValues(v, rv_.rmin, rv_.rmax, isStatic ? rv_.prop.substr(5) : rv_.prop, units);
@@ -973,8 +1126,7 @@ void App::rv3D() {
         rv_.view.setCaption(cap);
     }
     viewerCanvas(vb, rvUi_, [this, g](int cell) {
-        int i, j, k; g->ijk(g->globalOf[size_t(cell)], i, j, k);
-        ImGui::Text("Cell (%d, %d, %d)  active #%d", i + 1, j + 1, k + 1, cell + 1);
+        ImGui::Text("Cell %s  active #%d", g->cellLabel(g->globalOf[size_t(cell)]).c_str(), cell + 1);
         ImGui::Separator();
         ImGui::Text("%s = %.6g", rv_.prop.c_str(), rv_.view.valueOf(cell));
         ImGui::TextDisabled("depth %.2f", g->depth[size_t(cell)]);

@@ -1,0 +1,12 @@
+i_triggered_fixed      scatter from HF1+HF2+HF4+HF6 sigma 1.15  HF3/AG 0.247  t -0.99  one-sided p 0.197
+i_triggered_fixed      scatter from HF1+HF2+HF6     sigma 0.67  HF3/AG 0.247  t -1.72  one-sided p 0.114
+   factors {'HF1': 0.2104, 'HF2': 0.3643, 'HF3': 0.0683, 'HF4': 0.0256, 'HF5': 0.0, 'HF6': 0.0968}
+ii_continuous_all      scatter from HF1+HF2+HF4+HF6 sigma 0.32  HF3/AG 0.471  t -1.92  one-sided p 0.075
+ii_continuous_all      scatter from HF1+HF2+HF6     sigma 0.28  HF3/AG 0.471  t -2.19  one-sided p 0.080
+   factors {'HF1': 27.2264, 'HF2': 21.9437, 'HF3': 11.5151, 'HF4': 13.4779, 'HF5': 0.0, 'HF6': 15.6156}
+iii_continuous_M2.5    scatter from HF1+HF2+HF4+HF6 sigma 1.35  HF3/AG 0.405  t -0.55  one-sided p 0.311
+iii_continuous_M2.5    scatter from HF1+HF2+HF6     sigma 0.23  HF3/AG 0.405  t -3.23  one-sided p 0.042
+   factors {'HF1': 2.271, 'HF2': 3.3765, 'HF3': 1.121, 'HF4': 0.179, 'HF5': 0.0, 'HF6': 2.2758}
+x_continuous_M2.15     scatter from HF1+HF2+HF4+HF6 sigma 0.44  HF3/AG 0.522  t -1.20  one-sided p 0.159
+x_continuous_M2.15     scatter from HF1+HF2+HF6     sigma 0.23  HF3/AG 0.522  t -2.33  one-sided p 0.073
+   factors {'HF1': 3.5289, 'HF2': 5.5626, 'HF3': 2.3143, 'HF4': 1.9948, 'HF5': 0.0, 'HF6': 4.5152}

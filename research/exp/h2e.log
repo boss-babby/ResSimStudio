@@ -1,0 +1,8 @@
+h2e_GAS600_10_SGL (F30 repro: 16.60 / 36.21) t60 16.60 t90 36.21 | DONE steps 188 newton 2721 cuts 33  FPR 302.1274  23.58 s
+h2e_GAS600_10_SGLC t60 17.41 t90 38.27 | DONE steps 231 newton 3419 cuts 35  FPR 302.1274  27.56 s
+h2e_GAS600_5_SGLC t60 16.92 t90 37.47 | DONE steps 219 newton 3626 cuts 31  FPR 302.1132  65.00 s
+h2e_GAS600_2.5_SGLC t60 17.00 t90 38.25 | DONE steps 185 newton 3229 cuts 16  FPR 302.1191  123.00 s
+h2e_WATER_10_SGL t60 25.35 t90 58.50 | DONE steps 351 newton 5249 cuts 40  FPR 301.7491  28.78 s
+h2e_WATER_10_SGLC t60 25.35 t90 58.50 | DONE steps 351 newton 5249 cuts 40  FPR 301.7491  29.26 s
+SUMMARY SGLC t60 17.41 / 16.92 / 17.00 (spread 0.48) t90 38.27 / 37.47 / 38.25 (spread 0.81) | SGL t90 spread 2.19, SG t90 spread 2.22 | water guard OK
+VERDICT H2e SUPPORTED

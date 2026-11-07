@@ -2,6 +2,9 @@
 1   ICON   "ressim.ico"
 101 RCDATA "keyword_docs.txt"
 102 RCDATA "icons.ttf"
+103 RCDATA "inter_regular.ttf"
+104 RCDATA "inter_semibold.ttf"
+105 RCDATA "jbmono_regular.ttf"
 
 1 VERSIONINFO
 FILEVERSION 1,4,0,0

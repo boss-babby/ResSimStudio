@@ -1,0 +1,61 @@
+CASE N
+PAIR N  0 delta -1.4745e-01 = NL -3.5362e-03 + CV -1.4392e-01 | NL/|CV| -0.025 | s -2.290e-04 | replica 2.3e-07
+PAIR N  1 delta -3.4756e-01 = NL -1.2412e-02 + CV -3.3515e-01 | NL/|CV| -0.037 | s -1.574e-03 | replica 1.2e-07
+PAIR N  2 delta -2.8459e-01 = NL +3.0257e-03 + CV -2.8762e-01 | NL/|CV| +0.011 | s +1.161e-05 | replica 1.6e-07
+PAIR N  3 delta -1.1568e-01 = NL -6.8437e-03 + CV -1.0883e-01 | NL/|CV| -0.063 | s -2.644e-04 | replica 1.1e-07
+PAIR N  4 delta -3.5964e-02 = NL -3.7110e-05 + CV -3.5927e-02 | NL/|CV| -0.001 | s -2.709e-04 | replica 1.3e-07
+PAIR N  5 delta -4.3362e-01 = NL -4.6375e-03 + CV -4.2898e-01 | NL/|CV| -0.011 | s -1.329e-03 | replica 6.4e-08
+PAIR N  6 delta -4.8800e-02 = NL +4.5565e-04 + CV -4.9255e-02 | NL/|CV| +0.009 | s -2.468e-04 | replica 9.7e-08
+PAIR N  7 delta -1.5326e-02 = NL +8.3627e-04 + CV -1.6162e-02 | NL/|CV| +0.052 | s +3.651e-04 | replica 1.4e-07
+PAIR N  8 delta -1.4086e-02 = NL -6.8244e-03 + CV -7.2618e-03 | NL/|CV| -0.940 | s -3.251e-03 | replica 2.0e-08
+PAIR N  9 delta -8.8501e-03 = NL -2.2858e-03 + CV -6.5643e-03 | NL/|CV| -0.348 | s -5.615e-04 | replica 1.6e-07
+SUMMARY case N median NL/|CV| -0.018 (min -0.940 max +0.052) | NL > 0 in 3/10 | median s -2.677e-04 | violations 0/10
+CASE F
+PAIR F  0 delta -1.9564e-02 = NL -9.9956e-04 + CV -1.8565e-02 | NL/|CV| -0.054 | s -1.668e-04 | replica 8.6e-08
+PAIR F  1 delta -3.8516e-02 = NL -2.2519e-03 + CV -3.6264e-02 | NL/|CV| -0.062 | s -1.069e-03 | replica 9.4e-08
+PAIR F  2 delta -3.3236e-02 = NL +8.4447e-05 + CV -3.3320e-02 | NL/|CV| +0.003 | s -1.955e-04 | replica 6.7e-08
+PAIR F  3 delta -1.2828e-02 = NL -1.2743e-03 + CV -1.1554e-02 | NL/|CV| -0.110 | s -3.964e-04 | replica 4.8e-08
+PAIR F  4 delta -5.9136e-03 = NL -4.7013e-04 + CV -5.4435e-03 | NL/|CV| -0.086 | s -5.598e-05 | replica 4.5e-08
+PAIR F  5 delta -5.4875e-02 = NL -1.0950e-03 + CV -5.3780e-02 | NL/|CV| -0.020 | s -1.025e-03 | replica 8.2e-08
+PAIR F  6 delta -6.2822e-03 = NL -7.2390e-05 + CV -6.2099e-03 | NL/|CV| -0.012 | s -1.165e-04 | replica 7.8e-08
+PAIR F  7 delta -1.7068e-03 = NL +9.1964e-05 + CV -1.7988e-03 | NL/|CV| +0.051 | s +1.365e-04 | replica 7.3e-08
+PAIR F  8 delta -3.5492e-03 = NL -2.4430e-03 + CV -1.1062e-03 | NL/|CV| -2.208 | s -2.273e-03 | replica 1.2e-07
+PAIR F  9 delta -1.8277e-03 = NL -7.6259e-04 + CV -1.0651e-03 | NL/|CV| -0.716 | s -5.097e-04 | replica 3.0e-08
+SUMMARY case F median NL/|CV| -0.058 (min -2.208 max +0.051) | NL > 0 in 2/10 | median s -2.960e-04 | violations 0/10
+CASE NN
+PAIR NN  0 delta -2.2531e-01 = NL -3.3517e-03 + CV -2.2196e-01 | NL/|CV| -0.015 | s -4.231e-04 | replica 2.1e-07
+PAIR NN  1 delta -6.2234e-01 = NL -1.9893e-02 + CV -6.0245e-01 | NL/|CV| -0.033 | s -2.021e-03 | replica 5.6e-08
+PAIR NN  2 delta -4.8228e-01 = NL +3.3518e-03 + CV -4.8563e-01 | NL/|CV| +0.007 | s -2.647e-05 | replica 1.5e-07
+PAIR NN  3 delta -1.9717e-01 = NL -1.0687e-02 + CV -1.8649e-01 | NL/|CV| -0.057 | s -2.986e-04 | replica 1.1e-07
+PAIR NN  4 delta -4.9927e-02 = NL +2.5426e-03 + CV -5.2469e-02 | NL/|CV| +0.048 | s -3.936e-04 | replica 5.8e-08
+PAIR NN  5 delta -7.0341e-01 = NL -8.9693e-03 + CV -6.9444e-01 | NL/|CV| -0.013 | s -1.697e-03 | replica 3.1e-07
+PAIR NN  6 delta -6.7335e-02 = NL +1.3380e-03 + CV -6.8673e-02 | NL/|CV| +0.019 | s -3.410e-04 | replica 4.3e-08
+PAIR NN  7 delta -2.7182e-02 = NL +1.8622e-03 + CV -2.9044e-02 | NL/|CV| +0.064 | s +4.899e-04 | replica 3.7e-08
+PAIR NN  8 delta -1.8202e-02 = NL -7.6806e-03 + CV -1.0521e-02 | NL/|CV| -0.730 | s -3.420e-03 | replica 1.6e-07
+PAIR NN  9 delta -1.1111e-02 = NL -2.5482e-03 + CV -8.5626e-03 | NL/|CV| -0.298 | s -5.136e-04 | replica 1.2e-07
+SUMMARY case NN median NL/|CV| -0.014 (min -0.730 max +0.064) | NL > 0 in 4/10 | median s -4.084e-04 | violations 0/10
+CASE NH
+PAIR NH  0 delta -1.9166e-01 = NL -2.5619e-03 + CV -1.8910e-01 | NL/|CV| -0.014 | s -5.983e-04 | replica 2.1e-07
+PAIR NH  1 delta -3.5501e-01 = NL -1.4260e-02 + CV -3.4075e-01 | NL/|CV| -0.042 | s -1.270e-04 | replica 2.2e-07
+PAIR NH  2 delta -3.1118e-01 = NL -1.7988e-03 + CV -3.0938e-01 | NL/|CV| -0.006 | s -1.290e-03 | replica 4.3e-08
+PAIR NH  3 delta -1.3483e-01 = NL -1.0061e-02 + CV -1.2477e-01 | NL/|CV| -0.081 | s -2.978e-04 | replica 8.5e-08
+PAIR NH  4 delta -4.0293e-02 = NL -7.4397e-04 + CV -3.9549e-02 | NL/|CV| -0.019 | s -2.641e-03 | replica 6.9e-08
+PAIR NH  5 delta -3.2008e-01 = NL +1.1136e-02 + CV -3.3121e-01 | NL/|CV| +0.034 | s -8.031e-04 | replica 6.7e-08
+PAIR NH  6 delta -1.9439e-02 = NL +1.1233e-03 + CV -2.0563e-02 | NL/|CV| +0.055 | s -1.709e-04 | replica 1.1e-07
+PAIR NH  7 delta -3.7383e-02 = NL -2.0890e-03 + CV -3.5294e-02 | NL/|CV| -0.059 | s +1.284e-03 | replica 1.2e-07
+PAIR NH  8 delta -2.2068e-03 = NL +4.8791e-04 + CV -2.6948e-03 | NL/|CV| +0.181 | s -2.315e-04 | replica 1.9e-07
+PAIR NH  9 delta -3.6840e-03 = NL +6.8179e-04 + CV -4.3657e-03 | NL/|CV| +0.156 | s +1.190e-04 | replica 1.8e-08
+SUMMARY case NH median NL/|CV| -0.010 (min -0.081 max +0.181) | NL > 0 in 4/10 | median s -2.646e-04 | violations 0/10
+CASE W
+PAIR W  0 delta -2.7313e-01 = NL +4.3216e-05 + CV -2.7317e-01 | NL/|CV| +0.000 | s +1.096e-05 | replica 1.5e-07
+PAIR W  1 delta -4.8063e-01 = NL +7.3167e-05 + CV -4.8071e-01 | NL/|CV| +0.000 | s +2.447e-05 | replica 1.2e-07
+PAIR W  2 delta -3.2203e-01 = NL +4.8660e-05 + CV -3.2208e-01 | NL/|CV| +0.000 | s +1.614e-05 | replica 2.9e-07
+PAIR W  3 delta -1.9963e-01 = NL +3.2723e-05 + CV -1.9966e-01 | NL/|CV| +0.000 | s +5.767e-06 | replica 7.7e-08
+PAIR W  4 delta -4.0949e-02 = NL +6.7725e-06 + CV -4.0956e-02 | NL/|CV| +0.000 | s +2.568e-06 | replica 9.7e-08
+PAIR W  5 delta -5.4405e-01 = NL +8.0476e-05 + CV -5.4413e-01 | NL/|CV| +0.000 | s +3.339e-05 | replica 1.4e-07
+PAIR W  6 delta -7.9870e-02 = NL +1.4503e-05 + CV -7.9884e-02 | NL/|CV| +0.000 | s +3.563e-06 | replica 9.1e-08
+PAIR W  7 delta -2.2263e-02 = NL +3.4705e-06 + CV -2.2266e-02 | NL/|CV| +0.000 | s +6.872e-07 | replica 1.9e-07
+PAIR W  8 delta -7.9010e-03 = NL +1.4915e-06 + CV -7.9025e-03 | NL/|CV| +0.000 | s +1.084e-06 | replica 9.1e-08
+PAIR W  9 delta -1.1350e-02 = NL +2.1542e-06 + CV -1.1353e-02 | NL/|CV| +0.000 | s +7.177e-07 | replica 7.4e-08
+SUMMARY case W median NL/|CV| +0.000 (min +0.000 max +0.000) | NL > 0 in 10/10 | median s +4.665e-06 | violations 0/10
+H10DDONE runs 150

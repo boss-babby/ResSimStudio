@@ -88,12 +88,13 @@ struct Summary {
 };
 // smspec: path of the .SMSPEC/.FSMSPEC (data file(s) located automatically)
 bool readSummary(const std::string& smspec, Summary& s, std::string* err = nullptr);
-// Write ECLIPSE binary summary files BASE.SMSPEC + BASE.UNSMRY (big-endian Fortran records, the format read by
-// ResInsight, OPM tools, resdata/ecl2df). TIME is written first; report steps follow s.reportIndex.
-bool writeSummary(const Summary& s, const std::string& base, std::string* err = nullptr);
-
 // ResSim run -> same vector naming (FOPR, FWCT, WBHP:NAME, ...)
-Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<std::string>& wellNames, UnitSystem units);
+// compNames: names of the black-oil component vectors (C27 tracers, then C35 chemicals: SURFACT -> SUR, ALKALINE -> ALK,
+// FOAM -> FOA) -> FTPR / FTPT / FTIR / FTIT<name>, WTPR / WTIR<name>, surfactant also FSPR / FSPT / FSIR / FSIT
+Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<std::string>& wellNames, UnitSystem units,
+                       const std::vector<std::string>& compNames = {});
+// C35: component-vector names of a black-oil case run by the ResSim engine (TRACER names, NACL of SALT, then chemicals)
+std::vector<std::string> componentNames(const Case& c);
 
 // external summary -> ResSim run representation (one point per ministep; wells matched by name, missing = shut)
 std::vector<SummaryPoint> runFromSummary(const Summary& s, const std::vector<std::string>& wellNames);
@@ -112,8 +113,14 @@ public:
     const std::vector<RestartStep>& steps() const { return steps_; }
     std::vector<std::string> arrayNames(int step) const;          // per-cell arrays (count == numActive)
     std::vector<float> load(int step, const std::string& name) const;
+    // every numeric per-cell array of a step, generically: arrays of na values keep their name (repeated names -> NAME1,
+    // NAME2, ... e.g. E300 per-component XMF / YMF / ZMF / AMF), arrays of k * na values are split into NAME1..NAMEk;
+    // names in `skip` are left out
+    std::vector<std::pair<std::string, std::vector<float>>> cellArrays(int step, const std::vector<std::string>& skip = {}) const;
     void setNumActive(int na) { na_ = na; }
 private:
+    struct Entry { std::string name; int array = 0; int offset = 0; };   // generic per-cell array (offset in values)
+    std::vector<Entry> entries(int step) const;
     std::vector<std::unique_ptr<File>> files_;
     std::vector<RestartStep> steps_;
     int na_ = 0;
@@ -143,7 +150,22 @@ struct ResultCase {
 };
 bool openResultCase(const std::string& anyFile, ResultCase& rc, std::string* err = nullptr);
 // restart steps as ResSim snapshots (PRESSURE, SWAT, SGAS, RS; SOIL = 1 - SWAT - SGAS), per active cell of rc.grid
-std::vector<Snapshot> snapshotsFromRestart(const ResultCase& rc, int maxSteps = -1);
+// extraBudget: maximum number of floats kept in Snapshot::extra over all steps (all further restart arrays: compositions,
+// densities, CO2 arrays, ...); when exceeded, extras are kept for evenly spaced steps (always the first and last)
+std::vector<Snapshot> snapshotsFromRestart(const ResultCase& rc, int maxSteps = -1, size_t extraBudget = 60000000);
+
+// ---------------------------------------------------------------- writer (C14)
+// Writes a ResSim run as an ECLIPSE binary result case (big-endian, unified): BASE.EGRID (corner-point geometry, exact
+// COORD / ZCORN for corner-point cases, generated pillars + per-cell ZCORN for Cartesian / generated grids), BASE.INIT
+// (PORV, DX/DY/DZ, PERMX/Y/Z, PORO, NTG, DEPTH, SATNUM / PVTNUM / FIPNUM), BASE.SMSPEC + BASE.UNSMRY (field and well
+// vectors, one ministep per accepted time step, report steps at the snapshot times) and BASE.UNRST (PRESSURE, SWAT,
+// SGAS, SOIL, RS, RV, polymer and every Snapshot::extra array per report step). Readable by ResInsight, resdata / ecl
+// and OPM tools. Local grid refinements and EDFM fracture cells are not written (host / matrix grid only); for
+// visualisation and post-processing only (not an ECLIPSE restart that ECLIPSE can continue from).
+struct WriteReport { std::vector<std::string> files; std::vector<std::string> warnings; };
+bool writeResultCase(const std::string& base, const Case& c, const Grid& grid, const std::vector<SummaryPoint>& summary,
+                     const std::vector<Snapshot>& snaps, const std::vector<std::string>& wellNames, std::string* err = nullptr,
+                     WriteReport* rep = nullptr);
 
 // ---------------------------------------------------------------- comparison
 struct VectorDiff {

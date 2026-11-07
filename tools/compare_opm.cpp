@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) { std::fprintf(stderr, "run: %s\n", e.what()); }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::vector<std::string> names; for (auto& w : c.wells) names.push_back(w.name);
-    const ecl::Summary mine = ecl::summaryFromRun(s.summary(), names, c.units);
+    const ecl::Summary mine = ecl::summaryFromRun(s.summary(), names, c.units, ecl::componentNames(c));
     const auto diffs = ecl::compareSummaries(rc.summary, mine);
 
     std::printf("deck %s: ResSim %.1f d in %.2f s (%d steps, %d Newton) vs OPM %.1f d\n", argv[1], mine.time.empty() ? 0.0 : mine.time.back(), secs,

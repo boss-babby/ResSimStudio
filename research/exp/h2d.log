@@ -1,0 +1,11 @@
+h2d_GAS300_10_SG t60 nan t90 nan | DONE steps 128 newton 1071 cuts 28  FPR 301.0773  9.56 s
+PRECHECK SG t60 at 10 m = nan d < 10 d -> rate 100 sm3/d (pre-registered fallback)
+h2d_GAS100_10_SG t60 nan t90 nan | DONE steps 51 newton 121 cuts 0  FPR 300.3791  1.21 s
+h2d_GAS100_10_SGL t60 nan t90 nan | DONE steps 51 newton 121 cuts 0  FPR 300.3791  1.23 s
+h2d_GAS100_5_SG t60 nan t90 nan | DONE steps 51 newton 119 cuts 0  FPR 300.3765  2.75 s
+h2d_GAS100_5_SGL t60 nan t90 nan | DONE steps 51 newton 119 cuts 0  FPR 300.3765  2.79 s
+h2d_GAS100_2.5_SG t60 nan t90 nan | DONE steps 60 newton 188 cuts 3  FPR 300.3776  7.30 s
+h2d_GAS100_2.5_SGL t60 nan t90 nan | DONE steps 60 newton 188 cuts 3  FPR 300.3776  7.55 s
+SUMMARY rate 100: t60 spread SGL nan d, SG nan d; SGL nan / nan / nan; SG nan / nan / nan
+VERDICT H2d INCONCLUSIVE (no growth to 60 m at 300 or 100 sm3/d; script verdict corrected by hand, see CYCLE9_PLAN.md)
+H2DDONE

@@ -91,10 +91,8 @@ void App::editEOR() {
              "full mixing. Transport is solved sequentially-implicitly with outer coupling to the flow equations each time step; "
              "validated against OPM Flow (opm-tests POLYMER-02 / 03).");
     if (!case_.phases.polymer) {
-        ui::header("Other EOR processes");
-        ui::hint("Solvent (SOLVENT, Todd-Longstaff miscible), surfactant, foam, brine / low salinity and CO2 storage are on the "
-                 "roadmap. Decks using them are kept verbatim and run with the OPM Flow engine (Run > Engine).");
         if (ch) markDirty();
+        editChemEOR();
         return;
     }
     const int npvt = std::max(1, case_.props.numPvtRegions()), nsat = std::max(1, case_.props.numSatRegions());
@@ -103,7 +101,7 @@ void App::editEOR() {
 
     if (ImGui::BeginTabBar("eor")) {
         // ---------------------------------------------------------------- viscosity
-        if (ImGui::BeginTabItem("Viscosity (PLYVISC)")) {
+        if (ui::tabItem("Viscosity (PLYVISC)")) {
             regionCombo("##pvtr", "PVT region", &eorPvtSel_, npvt);
             auto rows = toRows(P.plyvisc[size_t(eorPvtSel_)]);
             if (ui::editTable<Row2>("plyvisc", rows, {cu, "water viscosity multiplier"}, [](Row2& r, int c) -> double* { return &r[size_t(c)]; })) {
@@ -121,7 +119,7 @@ void App::editEOR() {
             ImGui::EndTabItem();
         }
         // ---------------------------------------------------------------- adsorption and rock
-        if (ImGui::BeginTabItem("Adsorption & rock (PLYADS, PLYROCK)")) {
+        if (ui::tabItem("Adsorption & rock (PLYADS, PLYROCK)")) {
             regionCombo("##satr", "Sat. region", &eorSatSel_, nsat);
             const size_t r = size_t(eorSatSel_);
             ui::header("Adsorption isotherm (PLYADS)");
@@ -154,7 +152,7 @@ void App::editEOR() {
             ImGui::EndTabItem();
         }
         // ---------------------------------------------------------------- mixing regions
-        if (ImGui::BeginTabItem("Mixing (PLYMAX, PLMIXPAR, PLMIXNUM)")) {
+        if (ui::tabItem("Mixing (PLYMAX, PLMIXPAR, PLMIXNUM)")) {
             const int nm = std::max(1, P.numMixRegions());
             P.cmax.resize(size_t(nm), P.cmax.empty() ? 1.0 : P.cmax.back());
             P.mixing.resize(size_t(nm), P.mixing.empty() ? 1.0 : P.mixing.back());
@@ -199,7 +197,7 @@ void App::editEOR() {
             ImGui::EndTabItem();
         }
         // ---------------------------------------------------------------- shear
-        if (ImGui::BeginTabItem("Shear (PLYSHLOG)")) {
+        if (ui::tabItem("Shear (PLYSHLOG)")) {
             bool shear = !P.plyshlog.empty();
             if (ImGui::Checkbox("Shear thinning / thickening (PLYSHLOG)", &shear)) {
                 if (shear) {
@@ -240,7 +238,7 @@ void App::editEOR() {
             ImGui::EndTabItem();
         }
         // ---------------------------------------------------------------- injection schedule and initial concentration
-        if (ImGui::BeginTabItem("Injection (WPOLYMER, SPOLY)")) {
+        if (ui::tabItem("Injection (WPOLYMER, SPOLY)")) {
             auto& S = case_.schedule;
             std::vector<std::string> inj;
             for (auto& w : case_.wells) if (w.type == WellType::WaterInjector) inj.push_back(w.name);
@@ -294,11 +292,11 @@ void App::editEOR() {
                 if (ImGui::SliderInt("##stp", &eorStepSel_, 0, int(S.size()) - 1, b)) {}
                 auto& v = S[size_t(eorStepSel_)].wpolymer;
                 int del = -1;
-                if (ImGui::BeginTable("wpol", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchSame)) {
-                    ImGui::TableSetupColumn("Well (name or pattern*)");
+                if (ui::beginTable("wpol", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchSame)) {
+                    ui::tableColumn("Well (name or pattern*)");
                     char cc[64]; std::snprintf(cc, sizeof(cc), "Concentration (%s)", concUnit(us));
-                    ImGui::TableSetupColumn(cc);
-                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
+                    ui::tableColumn(cc);
+                    ui::tableColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
                     ImGui::TableHeadersRow();
                     for (int r = 0; r < int(v.size()); ++r) {
                         ImGui::PushID(r);
@@ -310,7 +308,7 @@ void App::editEOR() {
                         ImGui::TableSetColumnIndex(2); if (ImGui::SmallButton("x")) del = r;
                         ImGui::PopID();
                     }
-                    ImGui::EndTable();
+                    ui::endTable();
                 }
                 if (del >= 0) { v.erase(v.begin() + del); ch = true; }
                 if (ImGui::SmallButton("+ record")) { v.push_back({inj.empty() ? std::string("INJ*") : inj.front(), 0.0}); ch = true; }
@@ -332,7 +330,7 @@ void App::editEOR() {
             ImGui::EndTabItem();
         }
         // ---------------------------------------------------------------- results of the last run
-        if (ImGui::BeginTabItem("Results")) {
+        if (ui::tabItem("Results")) {
             std::vector<double> t, cir, cpr, cit, cpt, cip, cad;
             bool have = false;
             {
@@ -381,4 +379,5 @@ void App::editEOR() {
         ImGui::EndTabBar();
     }
     if (ch) markDirty();
+    editChemEOR();
 }

@@ -14,6 +14,20 @@ struct CSR {
     void finalizeDiag();
 };
 
+// y = A x for any matrix representation (scalar CSR, block CSR, Schur-reduced systems, GPU matrices)
+class LinearOperator {
+public:
+    virtual ~LinearOperator() = default;
+    virtual int size() const = 0;
+    virtual void apply(const double* x, double* y) const = 0;
+};
+struct CsrOperator : LinearOperator {
+    const CSR& A;
+    explicit CsrOperator(const CSR& a) : A(a) {}
+    int size() const override { return A.n; }
+    void apply(const double* x, double* y) const override { A.spmv(x, y); }
+};
+
 class Preconditioner {
 public:
     virtual ~Preconditioner() = default;
@@ -35,21 +49,25 @@ private:
 class AMG : public Preconditioner {
 public:
     void setup(const CSR& A);
+    void setup(CSR&& A);          // C45: takes the matrix over (no copy of the fine level)
+    bool refresh(const CSR& A);   // same pattern, new values: reuse the hierarchy (false: call setup)
     void apply(const double* r, double* z) const override;    // one V-cycle from z = 0
     int levels() const { return int(lv_.size()); }
     int coarsestSize() const { return lv_.empty() ? 0 : lv_.back().A.n; }
     double operatorComplexity() const;
+    struct Level;
+    const std::vector<Level>& hierarchy() const { return lv_; }   // C29: device CPR-AMG upload
+    const CSR& fineMatrix() const { static const CSR none; return lv_.empty() ? none : lv_[0].A; }
     struct Level {
         CSR A;
         int nc = 0;                                 // columns of P (= size of next level)
         std::vector<int> pRow, pCol; std::vector<double> pVal;   // prolongator (n x nc), CSR
         std::vector<int> rRow, rCol; std::vector<double> rVal;   // restriction = P^T
-        mutable std::vector<double> x, b, r, e, ae;
+        mutable std::vector<double> x, b, r;
     };
-    int sweeps = 1;         // Gauss-Seidel sweeps before / after the coarse correction
-    bool overCorrect = false; // minimal-residual scaling of the coarse correction (non-linear: use a flexible Krylov method)
 private:
     void cycle(int l) const;
+    void factorCoarsest();
     std::vector<Level> lv_;
     std::vector<double> lu_; std::vector<int> piv_;  // coarsest dense LU
 };
@@ -64,9 +82,11 @@ public:
     void setup(const CSR& A, int nCells, int nv, int nWells, const double* accBlocks = nullptr);
     void apply(const double* r, double* z) const override;
     const AMG& amg() const { return amg_; }
+    const CSR& pressureMatrix() const { return Ap_; }
+    int trueImpesFallbacks() const { return nFallback_; }   // cells that used quasi-IMPES weights
 private:
     const CSR* A_ = nullptr;
-    int na_ = 0, nv_ = 1, nw_ = 0;
+    int na_ = 0, nv_ = 1, nw_ = 0, nFallback_ = 0;
     std::vector<double> w_;                          // na * nv decoupling weights
     CSR Ap_;
     AMG amg_;
@@ -76,12 +96,17 @@ private:
 
 struct LinResult { bool converged = false; int iterations = 0; double relResidual = 0; };
 
+LinResult bicgstab(const LinearOperator& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
+                   double tol, int maxIt);
+LinResult gmres(const LinearOperator& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
+                double tol, int maxIt, int restart = 40);   // flexible (right-preconditioned, stores M v)
 LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
                    double tol, int maxIt);
 LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
                 double tol, int maxIt, int restart = 40);
 
-void setNumThreads(int n);   // 0 = hardware default
+void setNumThreads(int n);   // <= 0: one thread per PHYSICAL core (C21: was "leave unchanged", so a 1-thread batch run stuck)
+int  physicalCores();        // physical cores of this machine (hyper-threads excluded); >= 1
 int  numThreads();
 // true when a loop should run in an OpenMP team. Small loops (or a 1-thread setting, e.g. batch runs) stay serial
 // without entering the OpenMP runtime, whose per-region cost is high on Windows (libgomp / winpthreads).

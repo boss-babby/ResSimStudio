@@ -305,6 +305,14 @@ bool ChildProcess::start(const std::string& exe, const std::vector<std::string>&
         wchar_t buf[32767]; DWORD n = GetEnvironmentVariableW(L"PATH", buf, 32767);
         if (n && n < 32767) path.assign(buf, n);
         std::wstring add = fs::u8path(exe).parent_path().wstring();
+        // C17: Intel MPI runtime (oneAPI / "Common Files\Intel\Shared Libraries" redistributable): impi.dll lives in bin\release
+        // and the libfabric provider DLLs in libfabric\bin or opt\mpi\libfabric\bin - hydra fails to start ranks without them
+        {
+            const fs::path b = fs::u8path(exe).parent_path();
+            for (const fs::path& d : {b / "release", b.parent_path() / "libfabric" / "bin", b.parent_path() / "opt" / "mpi" / "libfabric" / "bin",
+                                      b.parent_path().parent_path() / "opt" / "mpi" / "libfabric" / "bin", b.parent_path() / "bin" / "release"})
+                if (isDir(d)) add += L";" + d.wstring();
+        }
         const std::string appdata = envStr("APPDATA");
         if (!appdata.empty()) {
             fs::path impi = fs::u8path(appdata) / "Python" / "Library" / "bin";
@@ -329,7 +337,9 @@ bool ChildProcess::start(const std::string& exe, const std::vector<std::string>&
     job_ = CreateJobObjectW(nullptr, nullptr);
     if (job_) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
-        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // BREAKAWAY_OK: MPI launchers (Intel MPI hydra, smpd) create their proxies / ranks with CREATE_BREAKAWAY_FROM_JOB;
+        // without it CreateProcess fails with error 5 "Access is denied" (C17 user report: HYD_spawn ... error code 5)
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &li, sizeof(li));
         if (!AssignProcessToJobObject(job_, pi.hProcess)) { CloseHandle(job_); job_ = nullptr; }
     }

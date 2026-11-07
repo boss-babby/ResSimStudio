@@ -1,13 +1,18 @@
 #include "viewport3d.h"
+#include "theme.h"
+#include "overlay_paint.h"
+#ifdef RESSIM_D3D11
 #include <d3dcompiler.h>
+#include <wincodec.h>
+#endif
 #include <cmath>
 #include <cfloat>
 #include <cstring>
 #include <algorithm>
 #include <string>
 #include <numeric>
-#include <wincodec.h>
 
+#ifdef RESSIM_D3D11
 // ----------------------------------------------------------------------------- shaders
 static const char* kShader = R"(
 cbuffer CB : register(b0) {
@@ -93,43 +98,12 @@ static ID3DBlob* compile(const char* entry, const char* target) {
     return code;
 }
 
-// ----------------------------------------------------------------------------- colormaps
-void colormapRGB(Colormap m, float t, float rgb[3]) {
-    t = std::min(1.0f, std::max(0.0f, t));
-    switch (m) {
-        case Colormap::Turbo: {   // polynomial approximation (Google, Apache-2.0)
-            const float t2 = t * t, t3 = t2 * t, t4 = t3 * t, t5 = t4 * t;
-            rgb[0] = 0.13572138f + 4.61539260f * t - 42.66032258f * t2 + 132.13108234f * t3 - 152.94239396f * t4 + 59.28637943f * t5;
-            rgb[1] = 0.09140261f + 2.19418839f * t + 4.84296658f * t2 - 14.18503333f * t3 + 4.27729857f * t4 + 2.82956604f * t5;
-            rgb[2] = 0.10667330f + 12.64194608f * t - 60.58204836f * t2 + 110.36276771f * t3 - 89.90310912f * t4 + 27.34824973f * t5;
-        } break;
-        case Colormap::Viridis: {
-            const float c0[3] = {0.2777273272234177f, 0.005407344544966578f, 0.3340998053353061f};
-            const float c1[3] = {0.1050930431085774f, 1.404613529898575f, 1.384590162594685f};
-            const float c2[3] = {-0.3308618287255563f, 0.214847559468213f, 0.09509516302823659f};
-            const float c3[3] = {-4.634230498983486f, -5.799100973351585f, -19.33244095627987f};
-            const float c4[3] = {6.228269936347081f, 14.17993336680509f, 56.69055260068105f};
-            const float c5[3] = {4.776384997670288f, -13.74514537774601f, -65.35303263337234f};
-            const float c6[3] = {-5.435455855934631f, 4.645852612178535f, 26.3124352495832f};
-            for (int k = 0; k < 3; ++k) rgb[k] = c0[k] + t * (c1[k] + t * (c2[k] + t * (c3[k] + t * (c4[k] + t * (c5[k] + t * c6[k])))));
-        } break;
-        case Colormap::Jet: {
-            rgb[0] = std::min(1.0f, std::max(0.0f, 1.5f - std::fabs(4.0f * t - 3.0f)));
-            rgb[1] = std::min(1.0f, std::max(0.0f, 1.5f - std::fabs(4.0f * t - 2.0f)));
-            rgb[2] = std::min(1.0f, std::max(0.0f, 1.5f - std::fabs(4.0f * t - 1.0f)));
-        } break;
-        case Colormap::CoolWarm: {
-            const float a[3] = {0.230f, 0.299f, 0.754f}, b[3] = {0.865f, 0.865f, 0.865f}, c[3] = {0.706f, 0.016f, 0.150f};
-            for (int k = 0; k < 3; ++k) rgb[k] = t < 0.5f ? a[k] + (b[k] - a[k]) * (t * 2) : b[k] + (c[k] - b[k]) * (t * 2 - 1);
-        } break;
-        case Colormap::Grey: rgb[0] = rgb[1] = rgb[2] = 0.15f + 0.8f * t; break;
-    }
-    for (int k = 0; k < 3; ++k) rgb[k] = std::min(1.0f, std::max(0.0f, rgb[k]));
-}
+#endif  // RESSIM_D3D11
 
 static void normalize3(float v[3]) { const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l > 0) { v[0] /= l; v[1] /= l; v[2] /= l; } }
 static void cross3(const float a[3], const float b[3], float o[3]) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
 
+#ifdef RESSIM_D3D11
 // ----------------------------------------------------------------------------- init / shutdown
 bool Viewport3D::init() {
     ID3D11Device* d = g_gfx.dev;
@@ -196,7 +170,7 @@ bool Viewport3D::init() {
 void Viewport3D::shutdown() {
     releaseTargets();
     SafeRelease(vs_); SafeRelease(ps_); SafeRelease(vsC_); SafeRelease(psC_); SafeRelease(il_); SafeRelease(ilC_);
-    SafeRelease(cb_); SafeRelease(vb_); SafeRelease(ib_); SafeRelease(wvb_); SafeRelease(wib_); SafeRelease(lvb_); SafeRelease(slvb_); SafeRelease(dssOff_); SafeRelease(dssNoWrite_);
+    SafeRelease(cb_); SafeRelease(vb_); SafeRelease(ib_); SafeRelease(wvb_); SafeRelease(wib_); SafeRelease(lvb_); SafeRelease(slvb_); SafeRelease(pvb_); SafeRelease(polvb_); SafeRelease(dssOff_); SafeRelease(dssNoWrite_);
     SafeRelease(valSRV_); SafeRelease(valBuf_); SafeRelease(cmapSRV_); SafeRelease(cmapTex_); SafeRelease(samp_);
     SafeRelease(rs_); SafeRelease(dss_); SafeRelease(bs_);
     SafeRelease(tfSmall_); SafeRelease(tfLabel_); SafeRelease(tfTitle_);
@@ -238,6 +212,88 @@ void Viewport3D::createTargets(int w, int h) {
     w_ = w; h_ = h;
 }
 
+// ----------------------------------------------------------------------------- D3D11 uploads
+void Viewport3D::gpuReleaseCells() { SafeRelease(vb_); SafeRelease(ib_); SafeRelease(lvb_); indexCount_ = 0; lineCount_ = 0; }
+void Viewport3D::gpuCells(const std::vector<Vtx>& vtx, const std::vector<unsigned>& idx, const std::vector<VtxC>& lv) {
+    if (!vtx.empty()) {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = UINT(vtx.size() * sizeof(Vtx)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = {vtx.data(), 0, 0};
+        g_gfx.dev->CreateBuffer(&bd, &sd, &vb_);
+        bd.ByteWidth = UINT(idx.size() * sizeof(unsigned)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        bd.Usage = D3D11_USAGE_DEFAULT;          // re-ordered back-to-front for transparency
+        sd.pSysMem = idx.data();
+        g_gfx.dev->CreateBuffer(&bd, &sd, &ib_);
+        indexCount_ = unsigned(idx.size());
+    }
+    if (!lv.empty()) {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = UINT(lv.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = {lv.data(), 0, 0};
+        g_gfx.dev->CreateBuffer(&bd, &sd, &lvb_);
+        lineCount_ = unsigned(lv.size());
+    }
+}
+void Viewport3D::gpuReleaseWells() { SafeRelease(wvb_); SafeRelease(wib_); wIndexCount_ = 0; }
+void Viewport3D::gpuWells(const std::vector<VtxC>& v, const std::vector<unsigned>& id) {
+    D3D11_BUFFER_DESC bd = {};
+    bd.ByteWidth = UINT(v.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = {v.data(), 0, 0};
+    g_gfx.dev->CreateBuffer(&bd, &sd, &wvb_);
+    bd.ByteWidth = UINT(id.size() * sizeof(unsigned)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER; sd.pSysMem = id.data();
+    g_gfx.dev->CreateBuffer(&bd, &sd, &wib_);
+    wIndexCount_ = unsigned(id.size());
+}
+void Viewport3D::gpuReleasePanels() { SafeRelease(pvb_); SafeRelease(polvb_); pCount_ = polCount_ = 0; }
+void Viewport3D::gpuPanels(const std::vector<VtxC>& tv, const std::vector<VtxC>& lv) {
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.ByteWidth = UINT(tv.size() * sizeof(VtxC));
+    D3D11_SUBRESOURCE_DATA sd = {tv.data(), 0, 0};
+    if (SUCCEEDED(g_gfx.dev->CreateBuffer(&bd, &sd, &pvb_))) pCount_ = unsigned(tv.size());
+    bd.ByteWidth = UINT(lv.size() * sizeof(VtxC)); sd.pSysMem = lv.data();
+    if (SUCCEEDED(g_gfx.dev->CreateBuffer(&bd, &sd, &polvb_))) polCount_ = unsigned(lv.size());
+}
+void Viewport3D::gpuValues(const std::vector<float>& v) {
+    const int na = int(v.size());
+    if (na > valCap_ || !valBuf_) {
+        SafeRelease(valSRV_); SafeRelease(valBuf_);
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = UINT(std::max(1, na) * sizeof(float)); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        g_gfx.dev->CreateBuffer(&bd, nullptr, &valBuf_);
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = DXGI_FORMAT_R32_FLOAT; sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.FirstElement = 0; sd.Buffer.NumElements = UINT(std::max(1, na));
+        g_gfx.dev->CreateShaderResourceView(valBuf_, &sd, &valSRV_);
+        valCap_ = na;
+    }
+    if (na > 0) {
+        D3D11_BOX box = {0, 0, 0, UINT(na * sizeof(float)), 1, 1};
+        g_gfx.ctx->UpdateSubresource(valBuf_, 0, &box, v.data(), 0, 0);
+    }
+}
+bool Viewport3D::gpuHasColormap() const { return cmapSRV_ != nullptr; }
+void Viewport3D::gpuColormap(const unsigned char* px) {
+    SafeRelease(cmapSRV_); SafeRelease(cmapTex_);
+    D3D11_TEXTURE1D_DESC td = {};
+    td.Width = 256; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd = {px, 0, 0};
+    g_gfx.dev->CreateTexture1D(&td, &sd, &cmapTex_);
+    g_gfx.dev->CreateShaderResourceView(cmapTex_, nullptr, &cmapSRV_);
+}
+bool Viewport3D::gpuHasIndexBuffer() const { return ib_ != nullptr; }
+void Viewport3D::gpuIndexUpdate() { g_gfx.ctx->UpdateSubresource(ib_, 0, nullptr, sortedIdx_.data(), 0, 0); }
+void Viewport3D::gpuStreamlines(const std::vector<VtxC>& lv) {
+    SafeRelease(slvb_); slCount_ = 0;
+    if (lv.empty()) return;
+    D3D11_BUFFER_DESC bd = {};
+    bd.ByteWidth = UINT(lv.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = {lv.data(), 0, 0};
+    if (SUCCEEDED(g_gfx.dev->CreateBuffer(&bd, &sd, &slvb_))) slCount_ = unsigned(lv.size());
+}
+#endif  // RESSIM_D3D11
+
 // ----------------------------------------------------------------------------- data
 void Viewport3D::setGrid(const ressim::Grid* g) {
     grid_ = g;
@@ -260,7 +316,7 @@ void Viewport3D::worldOf(float x, float y, float z, float o[3]) const {
 }
 
 void Viewport3D::buildGeometry() {
-    SafeRelease(vb_); SafeRelease(ib_); SafeRelease(lvb_); indexCount_ = 0; lineCount_ = 0;
+    gpuReleaseCells();
     if (!grid_) return;
     const ressim::Grid& g = *grid_;
     const int nx = g.nx, ny = g.ny, nz = g.nz;
@@ -306,42 +362,68 @@ void Viewport3D::buildGeometry() {
                     idx.insert(idx.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
                 }
             }
+    // local grid refinements: faces of local cells not hidden by a visible neighbour (local, or global across the LGR boundary)
+    for (int l = 0; l < int(g.lgr.size()); ++l) {
+        const auto& L = g.lgr[size_t(l)];
+        auto visL = [&](int i, int j, int k) -> bool {
+            if (i < 0 || j < 0 || k < 0 || i >= L.nx || j >= L.ny || k >= L.nz) return false;
+            const int gl = g.localCell(l, i, j, k);
+            const int a = g.activeOf[size_t(gl)];
+            if (a < 0) return false;
+            int I, J, K; g.ijk(gl, I, J, K);
+            if (I < i0 || I > i1 || J < j0 || J > j1 || K < k0 || K > k1) return false;
+            if (s.filterValue && a < int(values_.size())) {
+                const float v = values_[a];
+                if (!(v >= s.filterMin && v <= s.filterMax)) return false;
+            }
+            return true;
+        };
+        for (int k = 0; k < L.nz; ++k)
+            for (int j = 0; j < L.ny; ++j)
+                for (int i = 0; i < L.nx; ++i) {
+                    if (!visL(i, j, k)) continue;
+                    const int q = g.localCell(l, i, j, k);
+                    const unsigned cell = unsigned(g.activeOf[size_t(q)]);
+                    const auto& cr = g.corners[size_t(q)];
+                    int I, J, K; g.ijk(q, I, J, K);
+                    for (int f = 0; f < 6; ++f) {
+                        const int ni = i + D[f][0], nj = j + D[f][1], nk = k + D[f][2];
+                        if (ni >= 0 && nj >= 0 && nk >= 0 && ni < L.nx && nj < L.ny && nk < L.nz) {
+                            if (visL(ni, nj, nk)) continue;
+                        } else if (visible(I + D[f][0], J + D[f][1], K + D[f][2])) continue;
+                        const unsigned base = unsigned(vtx.size());
+                        float fc[3] = {0, 0, 0};
+                        for (int c = 0; c < 4; ++c) {
+                            const auto& p = cr[F[f][c]];
+                            vtx.push_back({{p.x, p.y, p.z}, {N[f][0], N[f][1], N[f][2]}, {UV[c][0], UV[c][1]}, cell});
+                            fc[0] += 0.25f * p.x; fc[1] += 0.25f * p.y; fc[2] += 0.25f * p.z;
+                        }
+                        faceCenters_.insert(faceCenters_.end(), {fc[0], fc[1], fc[2]});
+                        idx.insert(idx.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+                    }
+                }
+    }
     // extent for camera
     extent_ = std::max({g.bbMax.x - g.bbMin.x, g.bbMax.y - g.bbMin.y, (g.bbMax.z - g.bbMin.z) * set_.zScale, 1.0f});
-    if (!vtx.empty()) {
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = UINT(vtx.size() * sizeof(Vtx)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA sd = {vtx.data(), 0, 0};
-        g_gfx.dev->CreateBuffer(&bd, &sd, &vb_);
-        bd.ByteWidth = UINT(idx.size() * sizeof(unsigned)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        bd.Usage = D3D11_USAGE_DEFAULT;          // re-ordered back-to-front for transparency
-        sd.pSysMem = idx.data();
-        g_gfx.dev->CreateBuffer(&bd, &sd, &ib_);
-        indexCount_ = unsigned(idx.size());
-        sortedIdx_ = std::move(idx);
-    }
     // bounding box lines
+    std::vector<VtxC> lv;
     {
         const float x0 = g.bbMin.x, x1 = g.bbMax.x, y0 = g.bbMin.y, y1 = g.bbMax.y, z0 = g.bbMin.z, z1 = g.bbMax.z;
         const float P[8][3] = {{x0, y0, z0}, {x1, y0, z0}, {x0, y1, z0}, {x1, y1, z0}, {x0, y0, z1}, {x1, y0, z1}, {x0, y1, z1}, {x1, y1, z1}};
         const int E[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
-        std::vector<VtxC> lv;
         for (auto& e : E)
             for (int t = 0; t < 2; ++t) {
                 VtxC v = {{P[e[t]][0], P[e[t]][1], P[e[t]][2]}, {0, 0, 0}, {0.55f, 0.6f, 0.7f, 0.55f}};
                 lv.push_back(v);
             }
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = UINT(lv.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA sd = {lv.data(), 0, 0};
-        g_gfx.dev->CreateBuffer(&bd, &sd, &lvb_);
-        lineCount_ = unsigned(lv.size());
     }
+    gpuCells(vtx, idx, lv);
+    if (!vtx.empty()) sortedIdx_ = std::move(idx);
     geomDirty_ = false;
 }
 
 void Viewport3D::buildWellGeometry() {
-    SafeRelease(wvb_); SafeRelease(wib_); wIndexCount_ = 0;
+    gpuReleaseWells();
     wellsDirty_ = false;
     builtWellZ_ = set_.zScale;
     if (!grid_ || wells_.empty()) return;
@@ -412,13 +494,39 @@ void Viewport3D::buildWellGeometry() {
         for (const auto& pf : wl.perfs) tube(pf.a, pf.b, r * rs, pf.open ? perfCol : colX, true);
     }
     if (v.empty()) return;
-    D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = UINT(v.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA sd = {v.data(), 0, 0};
-    g_gfx.dev->CreateBuffer(&bd, &sd, &wvb_);
-    bd.ByteWidth = UINT(id.size() * sizeof(unsigned)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER; sd.pSysMem = id.data();
-    g_gfx.dev->CreateBuffer(&bd, &sd, &wib_);
-    wIndexCount_ = unsigned(id.size());
+    gpuWells(v, id);
+}
+
+void Viewport3D::buildPanels() {
+    panelsDirty_ = false;
+    builtPanelsZ_ = set_.zScale; builtPanelsCmap_ = set_.cmap; builtPanelsLo_ = vmin_; builtPanelsHi_ = vmax_; builtPanelsLog_ = set_.logScale;
+    gpuReleasePanels();
+    if (panels_.empty()) return;
+    std::vector<VtxC> tv, lv;
+    float lo = vmin_, hi = vmax_;
+    if (set_.logScale) { lo = std::log10(std::max(vmin_, 1e-12f)); hi = std::log10(std::max(vmax_, 1e-12f)); }
+    for (const PanelQuad& q : panels_) {
+        float col[4] = {q.rgba[0], q.rgba[1], q.rgba[2], q.rgba[3]};
+        if (std::isfinite(q.value)) {
+            float v = q.value;
+            if (set_.logScale) v = std::log10(std::max(v, 1e-12f));
+            const float t = hi > lo ? (v - lo) / (hi - lo) : 0.5f;
+            float rgb[3]; colormapRGB(set_.cmap, t, rgb, set_.cmapReverse);
+            col[0] = rgb[0]; col[1] = rgb[1]; col[2] = rgb[2];
+        }
+        // model-space normal of the quad (cross product of the diagonals)
+        const float ax = q.p[2][0] - q.p[0][0], ay = q.p[2][1] - q.p[0][1], az = q.p[2][2] - q.p[0][2];
+        const float bx = q.p[3][0] - q.p[1][0], by = q.p[3][1] - q.p[1][1], bz = q.p[3][2] - q.p[1][2];
+        float n[3] = {ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx};
+        const float nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (nl > 0) for (float& c : n) c /= nl; else { n[0] = 0; n[1] = 0; n[2] = 1; }
+        const int tri[6] = {0, 1, 2, 0, 2, 3};
+        for (int k : tri) tv.push_back({{q.p[k][0], q.p[k][1], q.p[k][2]}, {n[0], n[1], n[2]}, {col[0], col[1], col[2], col[3]}});
+        const float oc[4] = {col[0] * 0.35f, col[1] * 0.35f, col[2] * 0.35f, 1.0f};
+        for (int e = 0; e < 4; ++e)
+            for (int k : {e, (e + 1) % 4}) lv.push_back({{q.p[k][0], q.p[k][1], q.p[k][2]}, {0, 0, 0}, {oc[0], oc[1], oc[2], oc[3]}});
+    }
+    gpuPanels(tv, lv);
 }
 
 void Viewport3D::uploadValues() {
@@ -427,39 +535,19 @@ void Viewport3D::uploadValues() {
     const int na = grid_->numActive();
     std::vector<float> v(na, -1e30f);                 // -1e30 = undefined (drawn grey)
     for (int a = 0; a < na && a < int(values_.size()); ++a) if (std::isfinite(values_[a])) v[a] = values_[a];
-    if (na > valCap_ || !valBuf_) {
-        SafeRelease(valSRV_); SafeRelease(valBuf_);
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = UINT(std::max(1, na) * sizeof(float)); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        g_gfx.dev->CreateBuffer(&bd, nullptr, &valBuf_);
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-        sd.Format = DXGI_FORMAT_R32_FLOAT; sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        sd.Buffer.FirstElement = 0; sd.Buffer.NumElements = UINT(std::max(1, na));
-        g_gfx.dev->CreateShaderResourceView(valBuf_, &sd, &valSRV_);
-        valCap_ = na;
-    }
-    if (na > 0) {
-        D3D11_BOX box = {0, 0, 0, UINT(na * sizeof(float)), 1, 1};
-        g_gfx.ctx->UpdateSubresource(valBuf_, 0, &box, v.data(), 0, 0);
-    }
+    gpuValues(v);
 }
 
 void Viewport3D::updateColormap() {
-    if (builtCmap_ == set_.cmap && cmapSRV_) return;
-    SafeRelease(cmapSRV_); SafeRelease(cmapTex_);
+    if (builtCmap_ == set_.cmap && builtRev_ == set_.cmapReverse && gpuHasColormap()) return;
     unsigned char px[256 * 4];
     for (int i = 0; i < 256; ++i) {
-        float rgb[3]; colormapRGB(set_.cmap, i / 255.0f, rgb);
+        float rgb[3]; colormapRGB(set_.cmap, i / 255.0f, rgb, set_.cmapReverse);
         px[i * 4 + 0] = (unsigned char)(rgb[0] * 255); px[i * 4 + 1] = (unsigned char)(rgb[1] * 255);
         px[i * 4 + 2] = (unsigned char)(rgb[2] * 255); px[i * 4 + 3] = 255;
     }
-    D3D11_TEXTURE1D_DESC td = {};
-    td.Width = 256; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA sd = {px, 0, 0};
-    g_gfx.dev->CreateTexture1D(&td, &sd, &cmapTex_);
-    g_gfx.dev->CreateShaderResourceView(cmapTex_, nullptr, &cmapSRV_);
-    builtCmap_ = set_.cmap;
+    gpuColormap(px);
+    builtCmap_ = set_.cmap; builtRev_ = set_.cmapReverse;
 }
 
 // ----------------------------------------------------------------------------- camera
@@ -567,7 +655,7 @@ int Viewport3D::pick(float px, float py) const {
 // ----------------------------------------------------------------------------- transparency: back-to-front faces
 void Viewport3D::sortFaces(bool force) {
     const size_t nf = faceCenters_.size() / 3;
-    if (!ib_ || nf == 0 || sortedIdx_.size() != nf * 6) return;
+    if (!gpuHasIndexBuffer() || nf == 0 || sortedIdx_.size() != nf * 6) return;
     const float cam[7] = {yaw_, pitch_, dist_, panX_, panY_, panZ_, set_.zScale};
     bool same = !force;
     for (int k = 0; k < 7 && same; ++k) same = std::fabs(cam[k] - sortedCam_[k]) < 1e-5f;
@@ -589,7 +677,7 @@ void Viewport3D::sortFaces(bool force) {
         unsigned* o = &sortedIdx_[i * 6];
         o[0] = b; o[1] = b + 1; o[2] = b + 2; o[3] = b; o[4] = b + 2; o[5] = b + 3;
     }
-    g_gfx.ctx->UpdateSubresource(ib_, 0, nullptr, sortedIdx_.data(), 0, 0);
+    gpuIndexUpdate();
 }
 
 int Viewport3D::pickWell(float px, float py, float tol) const {
@@ -634,6 +722,7 @@ void Viewport3D::focusWellCamera(int idx) {
     dist_ = std::min(20.0f, std::max(0.05f, 2.2f * span / extent_));
 }
 
+#ifdef RESSIM_D3D11
 bool Viewport3D::saveImage(const std::string& path, int scale, std::string* err) {
     auto fail = [&](const char* what) { if (err) *err = what; return false; };
     const int w0 = w_, h0 = h_;
@@ -689,27 +778,14 @@ bool Viewport3D::saveImage(const std::string& path, int scale, std::string* err)
 }
 
 // ----------------------------------------------------------------------------- rendering
-ID3D11ShaderResourceView* Viewport3D::render(int w, int h) {
+ImTextureID Viewport3D::render(int w, int h) {
     w = std::max(16, w); h = std::max(16, h);
     if (w != w_ || h != h_ || !colorSRV_) createTargets(w, h);
-    {
-        const ViewSettings& a = set_; const ViewSettings& b = built_;
-        if (a.iMin != b.iMin || a.iMax != b.iMax || a.jMin != b.jMin || a.jMax != b.jMax || a.kMin != b.kMin || a.kMax != b.kMax ||
-            a.filterValue != b.filterValue || (a.filterValue && (a.filterMin != b.filterMin || a.filterMax != b.filterMax)))
-            geomDirty_ = true;
-        if (grid_ && a.zScale != builtZ_) {
-            extent_ = std::max({grid_->bbMax.x - grid_->bbMin.x, grid_->bbMax.y - grid_->bbMin.y, (grid_->bbMax.z - grid_->bbMin.z) * a.zScale, 1.0f});
-            builtZ_ = a.zScale;
-        }
-    }
-    if (geomDirty_) { buildGeometry(); built_ = set_; }
-    if (set_.zScale != builtWellZ_ || set_.focusWell != builtFocus_ || set_.wellRadius != builtRadius_) wellsDirty_ = true;
-    if (wellsDirty_) { buildWellGeometry(); builtFocus_ = set_.focusWell; builtRadius_ = set_.wellRadius; }
-    if (valuesDirty_) uploadValues();
-    updateColormap();
+    prepareFrame();
 
     ID3D11DeviceContext* c = g_gfx.ctx;
-    const float bg[4] = {0.085f, 0.09f, 0.105f, 1.0f};
+    const float* b3 = background3d();   // C40 setting
+    const float bg[4] = {b3[0], b3[1], b3[2], 1.0f};
     c->ClearRenderTargetView(msRTV_, bg);
     c->ClearDepthStencilView(msDSV_, D3D11_CLEAR_DEPTH, 1.0f, 0);
     c->OMSetRenderTargets(1, &msRTV_, msDSV_);
@@ -740,21 +816,6 @@ ID3D11ShaderResourceView* Viewport3D::render(int w, int h) {
     c->VSSetConstantBuffers(0, 1, &cb_);
     c->PSSetConstantBuffers(0, 1, &cb_);
 
-    if (linesDirty_) {
-        linesDirty_ = false;
-        SafeRelease(slvb_); slCount_ = 0;
-        if (!lines_.empty()) {
-            std::vector<VtxC> lv(lines_.size());
-            for (size_t i = 0; i < lines_.size(); ++i) {
-                const LineVertex& L = lines_[i];
-                lv[i] = VtxC{{L.x, L.y, L.z}, {0, 0, 0}, {L.r, L.g, L.b, L.a}};
-            }
-            D3D11_BUFFER_DESC bd = {};
-            bd.ByteWidth = UINT(lv.size() * sizeof(VtxC)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-            D3D11_SUBRESOURCE_DATA sd = {lv.data(), 0, 0};
-            if (SUCCEEDED(g_gfx.dev->CreateBuffer(&bd, &sd, &slvb_))) slCount_ = unsigned(lv.size());
-        }
-    }
     if (!dssOff_) {
         D3D11_DEPTH_STENCIL_DESC dd = {};
         dd.DepthEnable = FALSE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
@@ -815,13 +876,32 @@ ID3D11ShaderResourceView* Viewport3D::render(int w, int h) {
             c->OMSetDepthStencilState(dss_, 0);
         }
     };
+    auto drawPanels = [&]() {
+        if (!(pvb_ && pCount_) || !set_.fractures) return;
+        if (set_.fracXray && dssOff_) c->OMSetDepthStencilState(dssOff_, 0);
+        c->IASetInputLayout(ilC_);
+        c->VSSetShader(vsC_, nullptr, 0);
+        c->PSSetShader(psC_, nullptr, 0);
+        UINT stride = sizeof(VtxC), off = 0;
+        c->IASetVertexBuffers(0, 1, &pvb_, &stride, &off);
+        c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        c->Draw(pCount_, 0);
+        if (polvb_ && polCount_) {
+            c->IASetVertexBuffers(0, 1, &polvb_, &stride, &off);
+            c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            c->Draw(polCount_, 0);
+        }
+        c->OMSetDepthStencilState(dss_, 0);
+    };
     if (transparent) {
         // opaque geometry first (depth written), then the see-through cells sorted back to front
         drawWells();
+        drawPanels();
         drawLines();
         drawCells();
     } else {
         drawCells();
+        drawPanels();
         if (!set_.wellsXray) drawWells();
         drawLines();
         if (set_.wellsXray) drawWells();
@@ -835,131 +915,153 @@ ID3D11ShaderResourceView* Viewport3D::render(int w, int h) {
     ID3D11RenderTargetView* nullRTV = nullptr;
     c->OMSetRenderTargets(1, &nullRTV, nullptr);
     drawOverlay();
-    return colorSRV_;
+    return (ImTextureID)(intptr_t)colorSRV_;
 }
 
 // ----------------------------------------------------------------------------- Direct2D overlay
-static std::wstring widen(const std::string& s) {
-    if (s.empty()) return std::wstring();
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), &w[0], n);
-    return w;
-}
-
 void Viewport3D::drawOverlay() {
     if (!d2dTarget_) return;
     ID2D1DeviceContext* d = g_gfx.d2d;
     d->SetTarget(d2dTarget_);
     d->BeginDraw();
     // snapshots render at a multiple of the view size: scale the whole overlay so it keeps its proportions
-    const float S = overlayScale_;
-    const float W = float(w_) / S, H = float(h_) / S;
-    d->SetTransform(D2D1::Matrix3x2F::Scale(S, S));
-    ID2D1SolidColorBrush* text = nullptr; ID2D1SolidColorBrush* panel = nullptr; ID2D1SolidColorBrush* br = nullptr;
-    d->CreateSolidColorBrush(D2D1::ColorF(0.93f, 0.94f, 0.96f, 1.0f), &text);
-    d->CreateSolidColorBrush(D2D1::ColorF(0.06f, 0.065f, 0.075f, 0.72f), &panel);
-    d->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &br);
-    const float s = g_gfx.dpiScale;
-    auto drawText = [&](const std::wstring& t, IDWriteTextFormat* f, float x, float y, float wmax, ID2D1Brush* b) {
-        d->DrawText(t.c_str(), UINT32(t.size()), f, D2D1::RectF(x, y, x + wmax, y + 200 * s), b);
-    };
-    auto textWidth = [&](const std::wstring& t, IDWriteTextFormat* f) {
-        IDWriteTextLayout* lay = nullptr; float wd = 0;
-        if (SUCCEEDED(g_gfx.dwrite->CreateTextLayout(t.c_str(), UINT32(t.size()), f, 4000, 200, &lay))) {
-            DWRITE_TEXT_METRICS m; lay->GetMetrics(&m); wd = m.widthIncludingTrailingWhitespace; lay->Release();
-        }
-        return wd;
-    };
-
-    if (grid_ && text && panel && br) {
-        // title + caption (top-left)
-        if (!title_.empty()) {
-            std::wstring t = widen(title_ + (units_.empty() ? "" : "  [" + units_ + "]"));
-            const float tw = textWidth(t, tfTitle_);
-            std::wstring cap = widen(caption_);
-            const float cw = textWidth(cap, tfSmall_);
-            d->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(10 * s, 10 * s, 10 * s + std::max(tw, cw) + 24 * s, 10 * s + (cap.empty() ? 34 : 54) * s), 8 * s, 8 * s), panel);
-            drawText(t, tfTitle_, 22 * s, 15 * s, 2000, text);
-            if (!cap.empty()) { br->SetColor(D2D1::ColorF(0.65f, 0.7f, 0.78f, 1)); drawText(cap, tfSmall_, 22 * s, 40 * s, 2000, br); }
-        }
-        // legend (right side)
-        if (set_.legend && !title_.empty()) {
-            const float lh = std::min(H * 0.55f, 320 * s), lw = 16 * s;
-            const float x0 = W - 90 * s, y0 = 0.5f * (H - lh);
-            d->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0 - 12 * s, y0 - 14 * s, W - 8 * s, y0 + lh + 14 * s), 8 * s, 8 * s), panel);
-            const int nseg = set_.bands > 1 ? set_.bands : 96;
-            for (int i = 0; i < nseg; ++i) {
-                float rgb[3]; colormapRGB(set_.cmap, 1.0f - (i + 0.5f) / nseg, rgb);
-                br->SetColor(D2D1::ColorF(rgb[0], rgb[1], rgb[2], 1));
-                d->FillRectangle(D2D1::RectF(x0, y0 + lh * i / nseg, x0 + lw, y0 + lh * (i + 1) / nseg + 0.8f), br);
-            }
-            br->SetColor(D2D1::ColorF(1, 1, 1, 0.35f));
-            d->DrawRectangle(D2D1::RectF(x0, y0, x0 + lw, y0 + lh), br, 1.0f);
-            const int nt = 6;
-            for (int t = 0; t < nt; ++t) {
-                const float f = float(t) / (nt - 1);
-                float v;
-                if (set_.logScale) v = std::pow(10.0f, std::log10(std::max(vmin_, 1e-12f)) + f * (std::log10(std::max(vmax_, 1e-12f)) - std::log10(std::max(vmin_, 1e-12f))));
-                else v = vmin_ + f * (vmax_ - vmin_);
-                char buf[32];
-                const float av = std::fabs(v);
-                if (av != 0 && (av < 0.01f || av >= 1e5f)) std::snprintf(buf, sizeof(buf), "%.2e", v);
-                else if (av < 10) std::snprintf(buf, sizeof(buf), "%.3f", v);
-                else std::snprintf(buf, sizeof(buf), "%.1f", v);
-                const float y = y0 + lh * (1.0f - f);
-                br->SetColor(D2D1::ColorF(1, 1, 1, 0.6f));
-                d->DrawLine(D2D1::Point2F(x0 + lw, y), D2D1::Point2F(x0 + lw + 4 * s, y), br, 1.0f);
-                drawText(widen(buf), tfSmall_, x0 + lw + 7 * s, y - 8 * s, 80 * s, text);
-            }
-        }
-        // well labels
-        if (set_.wells && set_.labels) {
-            for (int wi = 0; wi < int(wells_.size()); ++wi) {
-                const auto& wl = wells_[size_t(wi)];
-                if (wl.path.empty()) continue;
-                if (set_.focusWell >= 0 && wi != set_.focusWell && wells_.size() > 12) continue;   // declutter while focused
-                float sx, sy;
-                if (!project(wl.path[0][0], wl.path[0][1], wl.path[0][2], sx, sy)) continue;
-                sx /= S; sy /= S;
-                if (sx < 0 || sy < 0 || sx > W || sy > H) continue;
-                const std::wstring t = widen(wl.name);
-                const float tw = textWidth(t, tfLabel_);
-                const D2D1_RECT_F r = D2D1::RectF(sx - tw * 0.5f - 7 * s, sy - 30 * s, sx + tw * 0.5f + 7 * s, sy - 9 * s);
-                br->SetColor(wl.injector ? D2D1::ColorF(0.12f, 0.42f, 0.85f, 0.92f) : D2D1::ColorF(0.10f, 0.55f, 0.30f, 0.92f));
-                if (!wl.open) br->SetColor(D2D1::ColorF(0.35f, 0.35f, 0.38f, 0.92f));
-                if (wi == set_.focusWell) br->SetColor(D2D1::ColorF(0.92f, 0.62f, 0.10f, 0.97f));
-                else if (set_.focusWell >= 0) br->SetColor(D2D1::ColorF(0.25f, 0.27f, 0.30f, 0.80f));
-                d->FillRoundedRectangle(D2D1::RoundedRect(r, 5 * s, 5 * s), br);
-                d->DrawLine(D2D1::Point2F(sx, sy - 9 * s), D2D1::Point2F(sx, sy), br, 2.0f * s);
-                drawText(t, tfLabel_, r.left + 7 * s, r.top + 2 * s, tw + 10 * s, text);
-            }
-        }
-        // axis triad (bottom-left): project unit directions from a virtual origin
-        if (set_.axes) {
-            const float ox = 55 * s, oy = H - 55 * s, L = 38 * s;
-            // camera basis (same construction as viewProj)
-            float z[3] = {std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_), std::cos(pitch_) * std::cos(yaw_)};
-            const float up[3] = {0, 1, 0};
-            float x[3]; cross3(up, z, x); normalize3(x);
-            float y[3]; cross3(z, x, y);
-            struct Ax { float w[3]; const wchar_t* name; D2D1::ColorF col; };
-            const Ax axes[3] = {{{1, 0, 0}, L"X (I)", D2D1::ColorF(0.95f, 0.36f, 0.36f, 1)},
-                                {{0, 0, 1}, L"Y (J)", D2D1::ColorF(0.36f, 0.86f, 0.46f, 1)},
-                                {{0, -1, 0}, L"Depth", D2D1::ColorF(0.40f, 0.62f, 1.0f, 1)}};
-            d->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox, oy), 48 * s, 48 * s), panel);
-            for (const auto& a : axes) {
-                const float vx = x[0] * a.w[0] + x[1] * a.w[1] + x[2] * a.w[2];
-                const float vy = y[0] * a.w[0] + y[1] * a.w[1] + y[2] * a.w[2];
-                const float ex = ox + vx * L, ey = oy - vy * L;
-                br->SetColor(a.col);
-                d->DrawLine(D2D1::Point2F(ox, oy), D2D1::Point2F(ex, ey), br, 2.2f * s);
-                d->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ex, ey), 2.5f * s, 2.5f * s), br);
-                drawText(a.name, tfSmall_, ex + 3 * s, ey - 8 * s, 60 * s, br);
-            }
-        }
+    d->SetTransform(D2D1::Matrix3x2F::Scale(overlayScale_, overlayScale_));
+    {
+        D2DPainter p(d, g_gfx.dwrite, tfSmall_, tfLabel_, tfTitle_);
+        if (p.ok()) paintOverlay(p);
     }
-    SafeRelease(text); SafeRelease(panel); SafeRelease(br);
     d->EndDraw();
     d->SetTarget(nullptr);
+}
+#endif  // RESSIM_D3D11
+
+// ----------------------------------------------------------------------------- per-frame preparation (all back ends)
+void Viewport3D::prepareFrame() {
+    {
+        const ViewSettings& a = set_; const ViewSettings& b = built_;
+        if (a.iMin != b.iMin || a.iMax != b.iMax || a.jMin != b.jMin || a.jMax != b.jMax || a.kMin != b.kMin || a.kMax != b.kMax ||
+            a.filterValue != b.filterValue || (a.filterValue && (a.filterMin != b.filterMin || a.filterMax != b.filterMax)))
+            geomDirty_ = true;
+        if (grid_ && a.zScale != builtZ_) {
+            extent_ = std::max({grid_->bbMax.x - grid_->bbMin.x, grid_->bbMax.y - grid_->bbMin.y, (grid_->bbMax.z - grid_->bbMin.z) * a.zScale, 1.0f});
+            builtZ_ = a.zScale;
+        }
+    }
+    if (geomDirty_) { buildGeometry(); built_ = set_; }
+    if (set_.zScale != builtWellZ_ || set_.focusWell != builtFocus_ || set_.wellRadius != builtRadius_) wellsDirty_ = true;
+    if (wellsDirty_) { buildWellGeometry(); builtFocus_ = set_.focusWell; builtRadius_ = set_.wellRadius; }
+    if (valuesDirty_) uploadValues();
+    updateColormap();
+    if (linesDirty_) {
+        linesDirty_ = false;
+        std::vector<VtxC> lv(lines_.size());
+        for (size_t i = 0; i < lines_.size(); ++i) {
+            const LineVertex& L = lines_[i];
+            lv[i] = VtxC{{L.x, L.y, L.z}, {0, 0, 0}, {L.r, L.g, L.b, L.a}};
+        }
+        gpuStreamlines(lv);
+    }
+    if (panelsDirty_ || (!panels_.empty() && (builtPanelsZ_ != set_.zScale || builtPanelsCmap_ != set_.cmap || builtPanelsLo_ != vmin_ ||
+                                             builtPanelsHi_ != vmax_ || builtPanelsLog_ != set_.logScale)))
+        buildPanels();
+}
+
+// ----------------------------------------------------------------------------- overlay layout (all back ends)
+void Viewport3D::paintOverlay(OverlayPainter& P) {
+    const float S = overlayScale_;
+    const float W = float(w_) / S, H = float(h_) / S;
+    const OvColor text{0.93f, 0.94f, 0.96f, 1.0f}, panel{0.06f, 0.065f, 0.075f, 0.72f};
+    const float s = g_gfx.dpiScale;
+    if (!grid_) return;
+    // title + caption (top-left)
+    if (!title_.empty()) {
+        const std::string t = title_ + (units_.empty() ? "" : "  [" + units_ + "]");
+        const float tw = P.textWidth(t, OvFont::Title);
+        const float cw = P.textWidth(caption_, OvFont::Small);
+        P.fillRoundRect(10 * s, 10 * s, 10 * s + std::max(tw, cw) + 24 * s, 10 * s + (caption_.empty() ? 34 : 54) * s, 8 * s, panel);
+        P.text(t, OvFont::Title, 22 * s, 15 * s, text);
+        if (!caption_.empty()) P.text(caption_, OvFont::Small, 22 * s, 40 * s, OvColor{0.65f, 0.7f, 0.78f, 1});
+    }
+    // legend (right side)
+    if (set_.legend && !title_.empty()) {
+        const float lh = std::min(H * 0.55f, 320 * s), lw = 16 * s;
+        const float x0 = W - 90 * s, y0 = 0.5f * (H - lh);
+        P.fillRoundRect(x0 - 12 * s, y0 - 14 * s, W - 8 * s, y0 + lh + 14 * s, 8 * s, panel);
+        const int nseg = set_.bands > 1 ? set_.bands : 96;
+        for (int i = 0; i < nseg; ++i) {
+            float rgb[3]; colormapRGB(set_.cmap, 1.0f - (i + 0.5f) / nseg, rgb, set_.cmapReverse);
+            P.fillRect(x0, y0 + lh * i / nseg, x0 + lw, y0 + lh * (i + 1) / nseg + 0.8f, OvColor{rgb[0], rgb[1], rgb[2], 1});
+        }
+        P.strokeRect(x0, y0, x0 + lw, y0 + lh, OvColor{1, 1, 1, 0.35f}, 1.0f);
+        const int nt = 6;
+        for (int t = 0; t < nt; ++t) {
+            const float f = float(t) / (nt - 1);
+            float v;
+            if (set_.logScale) v = std::pow(10.0f, std::log10(std::max(vmin_, 1e-12f)) + f * (std::log10(std::max(vmax_, 1e-12f)) - std::log10(std::max(vmin_, 1e-12f))));
+            else v = vmin_ + f * (vmax_ - vmin_);
+            const float y = y0 + lh * (1.0f - f);
+            P.line(x0 + lw, y, x0 + lw + 4 * s, y, OvColor{1, 1, 1, 0.6f}, 1.0f);
+            P.text(ovLegendNumber(v), OvFont::Small, x0 + lw + 7 * s, y - 8 * s, text);
+        }
+    }
+    // well labels
+    if (set_.wells && set_.labels) {
+        for (int wi = 0; wi < int(wells_.size()); ++wi) {
+            const auto& wl = wells_[size_t(wi)];
+            if (wl.path.empty()) continue;
+            if (set_.focusWell >= 0 && wi != set_.focusWell && wells_.size() > 12) continue;   // declutter while focused
+            float sx, sy;
+            if (!project(wl.path[0][0], wl.path[0][1], wl.path[0][2], sx, sy)) continue;
+            sx /= S; sy /= S;
+            if (sx < 0 || sy < 0 || sx > W || sy > H) continue;
+            const float tw = P.textWidth(wl.name, OvFont::Label);
+            const float rl = sx - tw * 0.5f - 7 * s, rt = sy - 30 * s, rr = sx + tw * 0.5f + 7 * s, rb = sy - 9 * s;
+            OvColor c = wl.injector ? OvColor{0.12f, 0.42f, 0.85f, 0.92f} : OvColor{0.10f, 0.55f, 0.30f, 0.92f};
+            if (!wl.open) c = OvColor{0.35f, 0.35f, 0.38f, 0.92f};
+            if (wi == set_.focusWell) c = OvColor{0.92f, 0.62f, 0.10f, 0.97f};
+            else if (set_.focusWell >= 0) c = OvColor{0.25f, 0.27f, 0.30f, 0.80f};
+            P.fillRoundRect(rl, rt, rr, rb, 5 * s, c);
+            P.line(sx, sy - 9 * s, sx, sy, c, 2.0f * s);
+            P.text(wl.name, OvFont::Label, rl + 7 * s, rt + 2 * s, text);
+        }
+    }
+    // C13: panel (fracture) labels at the top-centre of the first quad of every named panel
+    if (set_.labels && set_.fractures && !panels_.empty()) {
+        for (const PanelQuad& q : panels_) {
+            if (q.label.empty()) continue;
+            const float cx = 0.5f * (q.p[0][0] + q.p[1][0]), cy = 0.5f * (q.p[0][1] + q.p[1][1]), cz = std::min(q.p[0][2], q.p[1][2]);
+            float sx, sy;
+            if (!project(cx, cy, cz, sx, sy)) continue;
+            sx /= S; sy /= S;
+            if (sx < 0 || sy < 0 || sx > W || sy > H) continue;
+            const float tw = P.textWidth(q.label, OvFont::Small);
+            const float rl = sx - tw * 0.5f - 5 * s, rt = sy - 22 * s, rr = sx + tw * 0.5f + 5 * s, rb = sy - 6 * s;
+            const OvColor c{0.55f, 0.30f, 0.05f, 0.88f};
+            P.fillRoundRect(rl, rt, rr, rb, 4 * s, c);
+            P.line(sx, sy - 6 * s, sx, sy, c, 1.5f * s);
+            P.text(q.label, OvFont::Small, rl + 5 * s, rt + 1 * s, text);
+        }
+    }
+    // axis triad (bottom-left): project unit directions from a virtual origin
+    if (set_.axes) {
+        const float ox = 55 * s, oy = H - 55 * s, L = 38 * s;
+        // camera basis (same construction as viewProj)
+        float z[3] = {std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_), std::cos(pitch_) * std::cos(yaw_)};
+        const float up[3] = {0, 1, 0};
+        float x[3]; cross3(up, z, x); normalize3(x);
+        float y[3]; cross3(z, x, y);
+        struct Ax { float w[3]; const char* name; OvColor col; };
+        const Ax axes[3] = {{{1, 0, 0}, "X (I)", OvColor{0.95f, 0.36f, 0.36f, 1}},
+                            {{0, 0, 1}, "Y (J)", OvColor{0.36f, 0.86f, 0.46f, 1}},
+                            {{0, -1, 0}, "Depth", OvColor{0.40f, 0.62f, 1.0f, 1}}};
+        P.fillCircle(ox, oy, 48 * s, panel);
+        for (const auto& a : axes) {
+            const float vx = x[0] * a.w[0] + x[1] * a.w[1] + x[2] * a.w[2];
+            const float vy = y[0] * a.w[0] + y[1] * a.w[1] + y[2] * a.w[2];
+            const float ex = ox + vx * L, ey = oy - vy * L;
+            P.line(ox, oy, ex, ey, a.col, 2.2f * s);
+            P.fillCircle(ex, ey, 2.5f * s, a.col);
+            P.text(a.name, OvFont::Small, ex + 3 * s, ey - 8 * s, a.col);
+        }
+    }
 }

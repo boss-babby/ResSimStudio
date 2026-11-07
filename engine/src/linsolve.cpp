@@ -1,17 +1,63 @@
 #include "ressim/linsolve.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
 namespace ressim {
 
-static const int kParMin = 8000;   // below this size run serial (thread overhead dominates)
+static const int kParMin = 20000;  // below this size run serial (thread overhead dominates; C33: 8000 -> 20000, a barrier per
+                                   // vector op made small runs 10x slower whenever another process shared the cores)
+
+int physicalCores() {
+    static const int cores = [] {
+        int n = 0;
+#ifdef _WIN32
+        DWORD len = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+        if (len > 0) {
+            std::vector<char> buf(len);
+            auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data());
+            if (GetLogicalProcessorInformationEx(RelationProcessorCore, info, &len))
+                for (DWORD off = 0; off < len;) {
+                    auto* e = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+                    if (e->Relationship == RelationProcessorCore) ++n;
+                    off += e->Size;
+                }
+        }
+#else
+        std::ifstream f("/proc/cpuinfo");
+        std::set<std::pair<int, int>> ids; std::string line; int phys = 0;
+        while (std::getline(f, line)) {
+            if (line.rfind("physical id", 0) == 0) phys = std::atoi(line.c_str() + line.find(':') + 1);
+            else if (line.rfind("core id", 0) == 0) ids.insert({phys, std::atoi(line.c_str() + line.find(':') + 1)});
+        }
+        n = int(ids.size());
+#endif
+        const int logical = int(std::thread::hardware_concurrency());
+        // VMs often report every vCPU as one core (core id 0): trust the topology only when it shows >= 2 cores
+        if (n <= 1 || (logical > 0 && n > logical)) n = logical;
+        return std::max(1, n);
+    }();
+    return cores;
+}
 
 void setNumThreads(int n) {
 #ifdef _OPENMP
-    if (n > 0) omp_set_num_threads(n);
+    // memory-bound sparse kernels gain little from hyper-threads while the extra threads spin in every serial section
+    // C33: an explicit OMP_NUM_THREADS wins over the automatic choice (batch / regression runs share the machine)
+    if (n <= 0) if (const char* e = std::getenv("OMP_NUM_THREADS"); e && std::atoi(e) > 0) n = std::atoi(e);
+    omp_set_num_threads(n > 0 ? n : physicalCores());
 #else
     (void)n;
 #endif
@@ -110,9 +156,9 @@ static double dot(const std::vector<double>& a, const std::vector<double>& b) {
 }
 static double norm2(const std::vector<double>& a) { return std::sqrt(dot(a, a)); }
 
-LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
+LinResult bicgstab(const LinearOperator& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
                    double tol, int maxIt) {
-    const int n = A.n;
+    const int n = A.size();
     LinResult res;
     x.assign(n, 0.0);
     std::vector<double> r(b), rh(b), p(n, 0), v(n, 0), s(n), t(n), ph(n), sh(n);
@@ -131,7 +177,7 @@ LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<doub
             for (int i = 0; i < n; ++i) p[i] = r[i] + beta * (p[i] - omega * v[i]);
         }
         M.apply(p.data(), ph.data());
-        A.spmv(ph.data(), v.data());
+        A.apply(ph.data(), v.data());
         const double rv = dot(rh, v);
         if (std::fabs(rv) < 1e-300) break;
         alpha = rho / rv;
@@ -152,7 +198,7 @@ LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<doub
             res.converged = true; res.iterations = it; res.relResidual = sn / bn; return res;
         }
         M.apply(s.data(), sh.data());
-        A.spmv(sh.data(), t.data());
+        A.apply(sh.data(), t.data());
         const double tt = dot(t, t);
         omega = tt > 0 ? dot(t, s) / tt : 0;
         if (useParallel(n > kParMin)) {
@@ -169,9 +215,9 @@ LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<doub
     return res;
 }
 
-LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
+LinResult gmres(const LinearOperator& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x,
                 double tol, int maxIt, int m) {
-    const int n = A.n;
+    const int n = A.size();
     LinResult res;
     x.assign(n, 0.0);
     const double bn = norm2(b);
@@ -181,7 +227,7 @@ LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>
     auto Hat = [&](int i, int j) -> double& { return H[i * m + j]; };
     int total = 0;
     while (total < maxIt) {
-        A.spmv(x.data(), r.data());
+        A.apply(x.data(), r.data());
         for (int i = 0; i < n; ++i) r[i] = b[i] - r[i];
         double beta = norm2(r);
         res.relResidual = beta / bn;
@@ -191,7 +237,7 @@ LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>
         int j = 0;
         for (; j < m && total < maxIt; ++j, ++total) {
             M.apply(V[j].data(), Z[j].data());
-            A.spmv(Z[j].data(), w.data());
+            A.apply(Z[j].data(), w.data());
             for (int i = 0; i <= j; ++i) {
                 const double h = dot(w, V[i]);
                 Hat(i, j) = h;
@@ -224,6 +270,13 @@ LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>
     }
     res.iterations = total;
     return res;
+}
+
+LinResult bicgstab(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x, double tol, int maxIt) {
+    return bicgstab(CsrOperator(A), M, b, x, tol, maxIt);
+}
+LinResult gmres(const CSR& A, const Preconditioner& M, const std::vector<double>& b, std::vector<double>& x, double tol, int maxIt, int m) {
+    return gmres(CsrOperator(A), M, b, x, tol, maxIt, m);
 }
 
 } // namespace ressim

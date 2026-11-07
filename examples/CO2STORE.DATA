@@ -1,0 +1,94 @@
+-- CO2 storage in a brine aquifer (OPM Flow CO2STORE format, after opm-tests co2store/CO2STORE.DATA)
+-- 2-D vertical section 100 m x 100 m, CO2 injected at the bottom; the plume rises, spreads under the top
+-- and dissolves into the brine. In OPM CO2STORE decks the OIL phase is the brine.
+-- Runs on the ResSim CO2STORE core (Spycher-Pruess / Duan-Sun) and on OPM Flow.
+RUNSPEC
+TITLE
+CO2 storage - vertical section
+DIMENS
+ 20 1 20 /
+OIL
+GAS
+CO2STORE
+METRIC
+START
+ 1 'JAN' 2025 /
+WELLDIMS
+ 1 20 1 1 /
+TABDIMS
+ 1 1 40 20 /
+UNIFOUT
+
+GRID
+DX
+ 400*5 /
+DY
+ 400*100 /
+DZ
+ 400*5 /
+TOPS
+ 20*1000 /
+PORO
+ 400*0.3 /
+PERMX
+ 400*2000 /
+PERMY
+ 400*2000 /
+PERMZ
+ 400*200 /
+-- open lateral boundary: large pore volume in the last column (aquifer support)
+MULTPV
+ 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 /
+
+PROPS
+ROCK
+ 200 1e-6 /
+SGOF
+ 0     0      1      0
+ 0.05  0      0.85   0
+ 0.2   0.03   0.55   0
+ 0.4   0.15   0.25   0
+ 0.6   0.35   0.07   0
+ 0.8   0.6    0      0
+ 1.0   1.0    0      0
+/
+SALINITY
+ 0.7 /   -- mol NaCl / kg H2O (~ 39 000 ppm)
+
+SOLUTION
+EQUIL
+-- datum  p(bar) WOC  Pc   GOC   Pc
+ 1000    100    1100  0    900   0   1 1 0 /
+RTEMPVD
+ 1000 50
+ 1200 50
+/
+RSVD
+ 1000 0
+ 1200 0
+/
+
+SUMMARY
+FPR
+FGIP
+FGIT
+FGIR
+
+SCHEDULE
+WELSPECS
+ 'INJ' 'G1' 1 1 1* 'GAS' /
+/
+COMPDAT
+ 'INJ' 1 1 18 20 'OPEN' 1* 1* 0.2 /
+/
+WCONINJE
+ 'INJ' 'GAS' 'OPEN' 'RATE' 20000 1* 200 /
+/
+TSTEP
+ 12*30.4 /
+WCONINJE
+ 'INJ' 'GAS' 'SHUT' 'RATE' 0 1* 200 /
+/
+TSTEP
+ 12*30.4 24*91.3 /
+END

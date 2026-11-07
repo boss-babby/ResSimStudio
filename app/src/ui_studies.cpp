@@ -28,17 +28,24 @@ const char* kParamKinds[] = {"Perm X/Y multiplier", "Perm Z multiplier", "Porosi
                              "OWC depth", "Datum pressure", "Well skin", "Well PI multiplier", "Oil viscosity multiplier", "GOC depth",
                              "Net-to-gross multiplier (box)", "Vertical transmissibility MULTZ (box)", "krg curvature exponent",
                              "krog curvature exponent", "krow end-point multiplier", "Capillary pressure multiplier",
-                             "Injection rate multiplier", "Production rate multiplier"};
+                             "Injection rate multiplier", "Production rate multiplier",
+                             "Geomodel variogram range multiplier", "Geomodel realisation (seed)"};
 const int kNumKinds = int(sizeof(kParamKinds) / sizeof(kParamKinds[0]));
+static_assert(sizeof(kParamKinds) / sizeof(kParamKinds[0]) == size_t(ressim::kNumParamKinds), "parameter kind names");
+bool isGeoKind(ParamKind k) { return k == ParamKind::GeoRange || k == ParamKind::GeoSeed; }
 const char* kResp[] = {"FOPT - cumulative oil", "Oil recovery factor", "FWPT - cumulative water", "FGPT - cumulative gas",
                        "FWIT - cumulative water injected", "FPR - final average pressure", "FWCT - final water cut",
-                       "NPV (economics)", "History-match misfit"};
+                       "NPV (economics)", "History-match misfit",
+                       // C27: coupled mechanics (need FAULTMECH / GEOMECH in the case - studies now run the coupled physics)
+                       "Expected induced events (faults)", "Largest magnitude Mw (faults)", "Max Coulomb stress change (faults)",
+                       "Surface uplift [m] (geomechanics)", "Max failure index (geomechanics)"};
+static_assert(sizeof(kResp) / sizeof(kResp[0]) == size_t(ressim::kNumResponses), "response names");
 const char* kObsNames[] = {"WOPR", "WWPR", "WGPR", "WWIR", "WBHP", "WWCT", "WGOR", "FOPR", "FWPR", "FGPR", "FPR", "FWCT", "FGOR"};
 const int kNumObs = 13;
 
 bool needsTarget(ParamKind k) {
     return k == ParamKind::FaultMult || k == ParamKind::AquiferStrength || k == ParamKind::WellSkin || k == ParamKind::WellPI ||
-           k == ParamKind::InjRate || k == ParamKind::ProdRate;
+           k == ParamKind::InjRate || k == ParamKind::ProdRate || isGeoKind(k);
 }
 
 void setDefaults(StudyParam& p, const Case& c) {
@@ -65,6 +72,9 @@ void setDefaults(StudyParam& p, const Case& c) {
         case ParamKind::MultZ: p.low = 0.01; p.high = 1; break;
         case ParamKind::PcMult: p.low = 0.2; p.high = 3; break;
         case ParamKind::InjRate: case ParamKind::ProdRate: p.target = -1; p.low = 0.7; p.high = 1.3; p.log = false; break;
+        case ParamKind::GeoRange: p.target = -1; p.low = 0.5; p.high = 2; p.log = true; break;
+        case ParamKind::GeoSeed:
+            p.target = -1; p.base = c.propModels.empty() ? 1.0 : double(c.propModels[0].seed); p.low = 1; p.high = 100; p.log = false; break;
         default: break;
     }
 }
@@ -181,8 +191,88 @@ bool paramSlider(const char* id, const StudyParam& p, double* v) {
 } // namespace
 
 // ============================================================================ background worker
+const char* App::hmName(bool sh) const {
+    if (study_.hmMethod == 1) return "ES-MDA";
+    if (study_.hmAlgo == 2) return sh ? "Adjoint L-BFGS" : "Adjoint gradient + L-BFGS";
+    if (study_.hmAlgo == 1) return sh ? "LM (analytic)" : "Levenberg-Marquardt (analytic Jacobian)";
+    return sh ? "LM" : "Levenberg-Marquardt";
+}
+
+// misfit gradient at the base parameters by the discrete adjoint, forward sensitivities and central finite differences
+// of full runs - verifies the analytic gradient on the user's own case before an adjoint / analytic-LM match
+void App::gradientCheckPanel(int act) {
+    ui::header("Gradient check");
+    ImGui::TextDisabled("d(misfit) / d(normalised parameter) at the base values");
+    bool ma = study_.gradMask & 1, mf = study_.gradMask & 2, mfd = study_.gradMask & 4;
+    ImGui::Checkbox("Adjoint", &ma); ImGui::SameLine();
+    ImGui::Checkbox("Forward sens.", &mf); ImGui::SameLine();
+    ImGui::Checkbox("Finite diff.", &mfd);
+    study_.gradMask = (ma ? 1 : 0) | (mf ? 2 : 0) | (mfd ? 4 : 0);
+    if (mfd && ui::beginProps("gcopt", 0.45f)) {
+        ui::propD("FD step (normalised)", &study_.gradFdStep, "%.3g", "Central differences of full runs: 2 runs per parameter. "
+                  "Control / phase switching events make the misfit piecewise smooth, so FD over long schedules can differ "
+                  "from the exact (branch) gradient by ~1e-3 relative.");
+        ui::endProps();
+    }
+    ImGui::BeginDisabled(study_.running || act == 0 || study_.gradMask == 0 || case_.observations.empty());
+    if (ImGui::Button(ICON_ACTIVITY " Check gradient", ImVec2(-FLT_MIN, 0))) {
+        const Case base = case_; const int mask = study_.gradMask; const double h = study_.gradFdStep; const double rs = study_.adj.resStep;
+        study_.deferred = [this, base, mask, h, rs]() {
+            startStudy("Gradient check", [base, mask, h, rs](StudyState& S, const StudyCallbacks& cb) {
+                GradientCheck g = misfitGradient(base, base.studyParams, mask, h, cb, rs);
+                if (cb.log) {
+                    char b[220];
+                    if (g.ok) std::snprintf(b, sizeof(b), "gradient check: misfit %.6g, adjoint %.2fs, forward %.2fs, FD %.2fs (%d runs), replay deviation %.1e",
+                                            g.misfit, g.secAdjoint, g.secForward, g.secFd, g.fdRuns, g.replayDev);
+                    else std::snprintf(b, sizeof(b), "gradient check failed: %s", g.error.c_str());
+                    cb.log(b);
+                }
+                std::lock_guard<std::mutex> l(S.m); S.gradCheck = std::move(g); S.gradParams = base.studyParams; S.hasGradCheck = true;
+            });
+        };
+    }
+    ImGui::EndDisabled();
+    std::lock_guard<std::mutex> l(study_.m);
+    if (!study_.hasGradCheck) return;
+    const GradientCheck& G = study_.gradCheck;
+    if (!G.ok) { ImGui::TextColored(col4(Pal::Err), "%s", G.error.c_str()); return; }
+    ImGui::Text("misfit %.6g", G.misfit);
+    if (!G.adjoint.empty()) { ImGui::SameLine(); ImGui::TextDisabled(" adjoint %.2fs", G.secAdjoint); }
+    if (!G.forward.empty()) { ImGui::SameLine(); ImGui::TextDisabled(" forward %.2fs", G.secForward); }
+    if (!G.fd.empty()) { ImGui::SameLine(); ImGui::TextDisabled(" FD %.2fs (%d runs)", G.secFd, G.fdRuns); }
+    const std::vector<double>& ref = !G.adjoint.empty() ? G.adjoint : G.forward;
+    double gmax = 0;
+    for (double v : ref) gmax = std::max(gmax, std::fabs(v));
+    for (double v : G.fd) gmax = std::max(gmax, std::fabs(v));
+    const bool rel = !ref.empty() && !G.fd.empty();
+    if (ui::beginTable("gck", 4 + (rel ? 1 : 0), ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ui::tableColumn("Parameter"); ui::tableColumn("Adjoint"); ui::tableColumn("Forward");
+        ui::tableColumn("Finite diff."); if (rel) ui::tableColumn("|analytic - FD| / |g|max");
+        ImGui::TableHeadersRow();
+        for (size_t k = 0; k < G.act.size(); ++k) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const int pi = G.act[k];
+            ImGui::TextUnformatted(pi >= 0 && size_t(pi) < study_.gradParams.size() ? paramLabel(study_.gradParams[size_t(pi)], case_).c_str() : "?");
+            auto cell = [&](const std::vector<double>& v) { ImGui::TableNextColumn(); if (k < v.size()) ImGui::Text("%+.6e", v[k]); else ImGui::TextDisabled("-"); };
+            cell(G.adjoint); cell(G.forward); cell(G.fd);
+            if (rel) {
+                ImGui::TableNextColumn();
+                const double e = gmax > 0 ? std::fabs(ref[k] - G.fd[k]) / gmax : 0;
+                ImGui::TextColored(col4(e < 1e-4 ? Pal::Ok : e < 1e-2 ? Pal::Warn : Pal::Err), "%.2e", e);
+            }
+        }
+        ui::endTable();
+    }
+    ImGui::TextDisabled("replay deviation %.1e, linear residual %.1e", G.replayDev, G.maxLinRes);
+}
+
 void App::startStudy(const std::string& task, std::function<void(App::StudyState&, const StudyCallbacks&)> fn) {
     if (study_.running) return;
+    if (case_.comp.enabled) {   // the study drivers wrap the black-oil engine
+        notify("Sensitivity / history matching runs the black-oil engine - not yet available for compositional or CO2STORE cases (see ROADMAP)");
+        return;
+    }
     if (study_.th.joinable()) study_.th.join();
     study_.cancel = false; study_.running = true; study_.done = 0; study_.total = 0;
     study_.t0 = ImGui::GetTime();
@@ -310,11 +400,11 @@ void App::panelStudies() {
 
     if (ImGui::BeginTabBar("studytabs")) {
         std::unique_lock<std::mutex> lk(study_.m);
-        if (ImGui::BeginTabItem("Parameters")) { studyParams(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Observed data")) { studyObservations(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Sensitivity")) { studySensitivity(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("History matching")) { studyHistoryMatch(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Study log")) {
+        if (ui::tabItem("Parameters")) { studyParams(); ImGui::EndTabItem(); }
+        if (ui::tabItem("Observed data")) { studyObservations(); ImGui::EndTabItem(); }
+        if (ui::tabItem("Sensitivity")) { studySensitivity(); ImGui::EndTabItem(); }
+        if (ui::tabItem("History matching")) { studyHistoryMatch(); ImGui::EndTabItem(); }
+        if (ui::tabItem("Study log")) {
             if (ImGui::SmallButton("Clear")) study_.log.clear();
             ImGui::BeginChild("slog", ImVec2(0, 0), ImGuiChildFlags_Borders);
             if (g_fonts.mono) ImGui::PushFont(g_fonts.mono, 0.0f);
@@ -344,14 +434,24 @@ void App::studyParams() {
     const Case& c = case_;
     ui::hint("Uncertain parameters used by the sensitivity and history-matching tools. Multipliers act on the current case "
              "(1 = unchanged); a box limits a property multiplier to a sub-volume (1-based, 0 = all).");
+    for (size_t m = 0; m < c.propModels.size(); ++m) {   // C40: what the geomodel parameters re-simulate
+        const PropModelInput& q = c.propModels[m];
+        static const char* kPM[] = {"PORO", "PERMX", "NTG", "FACIES"};
+        ImGui::TextDisabled("Property model #%zu: %s by %s from %zu hard data%s (%s), ranges %.4g / %.4g / %.4g, seed %u%s", m + 1, kPM[std::clamp(q.property, 0, 3)],
+                            q.property == 3 ? "truncated Gaussian" : q.method == 0 ? "kriging" : "SGS", q.data.size(), q.fromWells ? " + well cells" : "", q.source.c_str(), q.rangeMax, q.rangeMin, q.rangeVert, q.seed,
+                            q.permFromPoro ? ", PERM from the poro-perm transform" : "");
+    }
     auto add = [&](ParamKind k, int target = 0) { StudyParam p; p.kind = k; p.target = target; setDefaults(p, c); P.push_back(p); markStudyDirty(); };
     if (ImGui::Button("+ Parameter")) ImGui::OpenPopup("addparam");
     if (ImGui::BeginPopup("addparam")) {
         for (int k = 0; k < kNumKinds; ++k) {
             const ParamKind pk = ParamKind(k);
             const bool en = !(pk == ParamKind::FaultMult && c.grid.faults.empty()) && !(pk == ParamKind::AquiferStrength && c.aquifers.empty()) &&
-                            !((pk == ParamKind::WellSkin || pk == ParamKind::WellPI || pk == ParamKind::InjRate || pk == ParamKind::ProdRate) && c.wells.empty());
+                            !((pk == ParamKind::WellSkin || pk == ParamKind::WellPI || pk == ParamKind::InjRate || pk == ParamKind::ProdRate) && c.wells.empty()) &&
+                            !(isGeoKind(pk) && c.propModels.empty());
             if (ImGui::MenuItem(kParamKinds[k], nullptr, false, en)) add(pk);
+            if (isGeoKind(pk) && c.propModels.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Needs a property model in the case: Geomodel > Export > Send to Model, or Model > Grid > Geostatistics > Apply.");
         }
         ImGui::EndPopup();
     }
@@ -371,16 +471,16 @@ void App::studyParams() {
     if (P.empty()) { ui::hint("No parameters yet."); return; }
 
     int del = -1;
-    if (ImGui::BeginTable("params", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
+    if (ui::beginTable("params", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
                           ImVec2(0, std::min(ImGui::GetContentRegionAvail().y - ImGui::GetFontSize() * 4, ImGui::GetFrameHeightWithSpacing() * (P.size() + 1.6f))))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
-        ImGui::TableSetupColumn("Parameter", 0, 2.6f);
-        ImGui::TableSetupColumn("Target / box", 0, 2.0f);
-        ImGui::TableSetupColumn("Base", 0, 1.0f); ImGui::TableSetupColumn("Low", 0, 1.0f); ImGui::TableSetupColumn("High", 0, 1.0f);
-        ImGui::TableSetupColumn("Log", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
-        ImGui::TableSetupColumn("Label", 0, 1.8f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.4f);
+        ui::tableColumn("On", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
+        ui::tableColumn("Parameter", 0, 2.6f);
+        ui::tableColumn("Target / box", 0, 2.0f);
+        ui::tableColumn("Base", 0, 1.0f); ui::tableColumn("Low", 0, 1.0f); ui::tableColumn("High", 0, 1.0f);
+        ui::tableColumn("Log", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.6f);
+        ui::tableColumn("Label", 0, 1.8f);
+        ui::tableColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.4f);
         ImGui::TableHeadersRow();
         for (int i = 0; i < int(P.size()); ++i) {
             StudyParam& p = P[i];
@@ -394,11 +494,16 @@ void App::studyParams() {
             ImGui::TableSetColumnIndex(2); ImGui::SetNextItemWidth(-FLT_MIN);
             if (needsTarget(p.kind)) {
                 std::vector<std::string> names;
+                static const char* kPM[] = {"PORO", "PERMX", "NTG", "FACIES"};
                 if (p.kind == ParamKind::FaultMult) for (auto& f : c.grid.faults) names.push_back(f.name);
                 else if (p.kind == ParamKind::AquiferStrength) for (auto& a : c.aquifers) names.push_back("Aquifer " + std::to_string(a.id));
+                else if (isGeoKind(p.kind))
+                    for (size_t m = 0; m < c.propModels.size(); ++m)
+                        names.push_back(std::string(kPM[std::clamp(c.propModels[m].property, 0, 3)]) + " #" + std::to_string(m + 1) +
+                                        (c.propModels[m].source.empty() ? std::string() : " (" + c.propModels[m].source + ")"));
                 else for (auto& w : c.wells) names.push_back(w.name);
-                const bool allOk = p.kind == ParamKind::InjRate || p.kind == ParamKind::ProdRate;
-                const char* allName = p.kind == ParamKind::InjRate ? "All injectors" : "All producers";
+                const bool allOk = p.kind == ParamKind::InjRate || p.kind == ParamKind::ProdRate || isGeoKind(p.kind);
+                const char* allName = p.kind == ParamKind::InjRate ? "All injectors" : isGeoKind(p.kind) ? "All property models" : "All producers";
                 const char* cur = (p.target >= 0 && p.target < int(names.size())) ? names[p.target].c_str() : allOk ? allName : "?";
                 if (ImGui::BeginCombo("##t", cur)) {
                     if (allOk && ImGui::Selectable(allName, p.target < 0)) { p.target = -1; ch = true; }
@@ -449,7 +554,7 @@ void App::studyParams() {
             if (ch) markStudyDirty();
             ImGui::PopID();
         }
-        ImGui::EndTable();
+        ui::endTable();
     }
     if (del >= 0) { P.erase(P.begin() + del); markStudyDirty(); }
     // validation hint
@@ -604,11 +709,11 @@ void App::studyObservations() {
         if (ImGui::DragFloat("Series weight", &w, 0.02f, 0.0f, 100.0f, "%.2f")) { for (int q : gi) O[size_t(q)].weight = std::max(0.0f, w); markStudyDirty(); }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Weight of every observation of this series in the misfit (sigma / sqrt(weight)); 0 ignores the series");
     }
-    if (ImGui::BeginTable("obs", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
+    if (ui::beginTable("obs", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchSame, ImVec2(0, -FLT_MIN))) {   // fills the observation panel
         ImGui::TableSetupScrollFreeze(0, 1);
         for (const char* h : {"Time (d)", "Value", "Sigma", ""}) (void)h;
-        ImGui::TableSetupColumn("Series"); ImGui::TableSetupColumn("Time (d)"); ImGui::TableSetupColumn("Value"); ImGui::TableSetupColumn("Sigma"); ImGui::TableSetupColumn("Weight");
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.4f);
+        ui::tableColumn("Series"); ui::tableColumn("Time (d)"); ui::tableColumn("Value"); ui::tableColumn("Sigma"); ui::tableColumn("Weight");
+        ui::tableColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.4f);
         ImGui::TableHeadersRow();
         const auto& idx = groups[study_.plotObs].idx;
         ImGuiListClipper clip; clip.Begin(int(idx.size()));
@@ -627,7 +732,7 @@ void App::studyObservations() {
                 ImGui::TableSetColumnIndex(5); if (ImGui::SmallButton("x")) del = idx[r];
                 ImGui::PopID();
             }
-        ImGui::EndTable();
+        ui::endTable();
     }
     if (del >= 0) { O.erase(O.begin() + del); markStudyDirty(); }
     ImGui::EndChild();
@@ -645,7 +750,7 @@ void App::studySensitivity() {
     int act = 0; for (auto& p : P) if (p.active) ++act;
     const int hw = int(std::max(1u, std::thread::hardware_concurrency()));
     if (ui::beginProps("sensopt", 0.36f)) {
-        ui::propCombo("Response", &study_.response, kResp, 9, "Quantity whose sensitivity / uncertainty is analysed");
+        ui::propCombo("Response", &study_.response, kResp, ressim::kNumResponses, "Quantity whose sensitivity / uncertainty is analysed");
         ui::propI("Parallel runs (0 = auto)", &study_.workers, 0, hw * 2);
         if (Response(study_.response) == Response::NPV) {
             ui::propD("Oil price / stb", &study_.eco.oilPrice, "%.4g");
@@ -693,7 +798,7 @@ void App::studySensitivity() {
     ImGui::EndDisabled();
 
     const float fs = ImGui::GetFontSize();
-    if (ImGui::BeginTable("sensres", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
+    if (ui::beginTable("sensres", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
         ImGui::TableNextRow();
         // ---- tornado
         ImGui::TableSetColumnIndex(0);
@@ -760,7 +865,7 @@ void App::studySensitivity() {
             }
             barChart("##spear", lab, neg, pos, 0.0, "negative", "positive", true);
         } else ImGui::TextDisabled("Run Monte Carlo for P10/P50/P90, the FOPT fan chart and rank correlations.");
-        ImGui::EndTable();
+        ui::endTable();
     }
 }
 
@@ -778,9 +883,9 @@ void App::studyHistoryMatch() {
     const auto groups = obsGroups(case_);
     study_.plotObs = std::clamp(study_.plotObs, 0, std::max(0, int(groups.size()) - 1));
 
-    if (ImGui::BeginTable("hm", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
-        ImGui::TableSetupColumn("a", ImGuiTableColumnFlags_WidthStretch, 0.42f);
-        ImGui::TableSetupColumn("b", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+    if (ui::beginTable("hm", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
+        ui::tableColumn("a", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+        ui::tableColumn("b", ImGuiTableColumnFlags_WidthStretch, 0.58f);
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         const RunResult* bestRun = nullptr; const RunResult* initRun = nullptr;
@@ -864,12 +969,12 @@ void App::studyHistoryMatch() {
                 const auto& HP = study_.hmParams;
                 ImGui::Spacing();
                 if (g_fonts.bold) ImGui::PushFont(g_fonts.bold, 0.0f);
-                ImGui::TextColored(col4(Pal::Ok), "%s: misfit %.4g -> %.4g  (%d runs)", study_.hmMethod == 0 ? "LM" : "ES-MDA", H.initialMisfit, H.bestMisfit, H.runs);
+                ImGui::TextColored(col4(Pal::Ok), "%s: misfit %.4g -> %.4g  (%d runs)", hmName(true), H.initialMisfit, H.bestMisfit, H.runs);
                 if (g_fonts.bold) ImGui::PopFont();
                 // parameter table
-                if (ImGui::BeginTable("hmp", study_.hmMethod == 1 ? 5 : 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                    ImGui::TableSetupColumn("Parameter", 0, 2.2f); ImGui::TableSetupColumn("Initial"); ImGui::TableSetupColumn("Best");
-                    if (study_.hmMethod == 1) { ImGui::TableSetupColumn("Posterior mean"); ImGui::TableSetupColumn("P90 - P10"); }
+                if (ui::beginTable("hmp", study_.hmMethod == 1 ? 5 : 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                    ui::tableColumn("Parameter", 0, 2.2f); ui::tableColumn("Initial"); ui::tableColumn("Best");
+                    if (study_.hmMethod == 1) { ui::tableColumn("Posterior mean"); ui::tableColumn("P90 - P10"); }
                     ImGui::TableHeadersRow();
                     for (int i = 0; i < int(HP.size()) && i < int(H.best.size()); ++i) {
                         if (!HP[i].active) continue;
@@ -889,7 +994,7 @@ void App::studyHistoryMatch() {
                             }
                         }
                     }
-                    ImGui::EndTable();
+                    ui::endTable();
                 }
                 if (ImGui::Button("Apply best match to the case")) {
                     const std::vector<double> v = H.best; const std::vector<StudyParam> hp = HP;
@@ -956,9 +1061,9 @@ void App::studyHistoryMatch() {
             const std::vector<double> rb = residuals(*bestRun, case_, case_.observations, sig);
             std::vector<double> ri;
             if (initRun && initRun->ok) ri = residuals(*initRun, case_, case_.observations, sig);
-            if (ImGui::BeginTable("mis", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, fs * 8))) {
+            if (ui::beginTable("mis", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, fs * 8))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Series"); ImGui::TableSetupColumn(initRun ? "Misfit before" : "-"); ImGui::TableSetupColumn("Misfit now");
+                ui::tableColumn("Series"); ui::tableColumn(initRun ? "Misfit before" : "-"); ui::tableColumn("Misfit now");
                 ImGui::TableHeadersRow();
                 for (int g = 0; g < int(groups.size()); ++g) {
                     double a = 0, b = 0;
@@ -970,10 +1075,10 @@ void App::studyHistoryMatch() {
                     ImGui::TableSetColumnIndex(1); if (!ri.empty()) ImGui::Text("%.4g", a);
                     ImGui::TableSetColumnIndex(2); ImGui::TextColored(col4(b <= 1.5 ? Pal::Ok : b <= 10 ? Pal::Warn : Pal::Err), "%.4g", b);
                 }
-                ImGui::EndTable();
+                ui::endTable();
             }
         }
-        ImGui::EndTable();
+        ui::endTable();
     }
 }
 
@@ -981,8 +1086,8 @@ void App::studyHistoryMatch() {
 // Full-screen sensitivity / history-matching screen: setup (left), result views (centre), run archive (right).
 namespace {
 const char* kMethods[] = {"Tornado (one at a time)", "Monte Carlo (Latin hypercube)", "Experimental design + proxy",
-                          "Levenberg-Marquardt", "ES-MDA ensemble", "Manual (sliders)"};
-const char* kMethodIcons[] = {ICON_CHART_COLUMN, ICON_SHUFFLE, ICON_GRID_3X3, ICON_TRENDING_UP, ICON_SPLIT, ICON_SLIDERS_HORIZONTAL};
+                          "Levenberg-Marquardt", "ES-MDA ensemble", "Manual (sliders)", "Adjoint gradient (L-BFGS / per-cell field)"};
+const char* kMethodIcons[] = {ICON_CHART_COLUMN, ICON_SHUFFLE, ICON_GRID_3X3, ICON_TRENDING_UP, ICON_SPLIT, ICON_SLIDERS_HORIZONTAL, ICON_ACTIVITY};
 const char* kDesigns[] = {"Latin hypercube", "Two-level full factorial", "Central composite", "Plackett-Burman", "Random"};
 const char* kGroupings[] = {"Quantity (WOPR, WBHP, ...)", "Well", "Quantity + well", "Phase class (oil / water / gas / pressure)"};
 const char* kOvVec[] = {"FOPR", "FWPR", "FGPR", "FWIR", "FOPT", "FWPT", "FGPT", "FWIT", "FPR", "FWCT", "FGOR",
@@ -1121,14 +1226,17 @@ void App::studiesWorkspace() {
 void App::studiesSetup() {
     const float fs = ImGui::GetFontSize();
     if (!ImGui::BeginTabBar("##setup")) return;
-    if (ImGui::BeginTabItem(ICON_PLAY " Method")) {
+    if (ui::tabItem(ICON_PLAY " Method")) {
         ImGui::BeginChild("##meth");
         const auto& P = case_.studyParams;
         int act = 0; for (auto& p : P) if (p.active) ++act;
         ui::header("Method");
         if (study_.wsMode == 1 && study_.wsMethod < 3) study_.wsMethod = 3;
         if (study_.wsMode == 0 && study_.wsMethod >= 3) study_.wsMethod = 0;
-        for (int m = study_.wsMode == 1 ? 3 : 0; m < (study_.wsMode == 1 ? 6 : 3); ++m) {
+        static const int kOrderSA[] = {0, 1, 2}, kOrderHM[] = {3, 6, 4, 5};
+        const int* order = study_.wsMode == 1 ? kOrderHM : kOrderSA;
+        for (int oi = 0; oi < (study_.wsMode == 1 ? 4 : 3); ++oi) {
+            const int m = order[oi];
             char b[96]; std::snprintf(b, sizeof(b), "%s  %s", kMethodIcons[m], kMethods[m]);
             if (ImGui::Selectable(b, study_.wsMethod == m)) study_.wsMethod = m;
         }
@@ -1136,7 +1244,7 @@ void App::studiesSetup() {
         ui::header("Options");
         const int hw = int(std::max(1u, std::thread::hardware_concurrency()));
         if (ui::beginProps("wsopt", 0.45f)) {
-            if (M <= 2 || M == 5) ui::propCombo("Response", &study_.response, kResp, 9, "Quantity analysed by sensitivity / optimised by the proxy");
+            if (M <= 2 || M == 5) ui::propCombo("Response", &study_.response, kResp, ressim::kNumResponses, "Quantity analysed by sensitivity / optimised by the proxy");
             if (Response(study_.response) == Response::NPV && (M <= 2)) {
                 ui::propD("Oil price / stb", &study_.eco.oilPrice, "%.4g");
                 ui::propD("Gas price / Mscf", &study_.eco.gasPrice, "%.4g");
@@ -1149,14 +1257,59 @@ void App::studiesSetup() {
                 ui::propCombo("Design", &study_.designKind, kDesigns, 5, "Experimental design of the training runs");
                 if (study_.designKind == 0 || study_.designKind == 4) ui::propI("Runs", &study_.designN, 4, 2000);
                 ui::propI("Seed", &study_.seed, 1, 1 << 30);
-                ui::propBool("Quadratic proxy", &study_.proxyQuad, "Quadratic response surface (else linear)");
+                {
+                    static const char* kPk[] = {"Polynomial response surface", "Gaussian process (kriging / ML)"};
+                    ui::propCombo("Proxy model", &study_.proxyKind, kPk, 2, "C28: Gaussian process = CMOST-style ML proxy - interpolates the training runs, "
+                                  "ARD length scales by maximum likelihood, gives a prediction uncertainty; best for non-polynomial responses");
+                }
+                if (study_.proxyKind == 0) ui::propBool("Quadratic proxy", &study_.proxyQuad, "Quadratic response surface (else linear)");
                 ui::propBool("Maximise response", &study_.proxyMax, "Optimum of the proxy: maximum (else minimum)");
             }
             if (M == 3) {
-                ui::propI("Max iterations", &study_.lm.maxIter, 1, 100);
-                ui::propD("Finite-difference step", &study_.lm.fdStep, "%.3g");
-                ui::propD("Initial damping", &study_.lm.lambda0, "%.3g");
-                ui::propD("Tolerance", &study_.lm.tol, "%.3g");
+                static const char* kOpt[] = {"Finite-difference Jacobian",
+                                             "Analytic Jacobian (forward sensitivities)"};
+                study_.hmOpt = std::min(study_.hmOpt, 1);
+                ui::propCombo("Jacobian", &study_.hmOpt, kOpt, 2,
+                              "Finite differences: one perturbed run per parameter per iteration.\n"
+                              "Analytic Jacobian: exact discrete forward sensitivities of every observation (one recorded "
+                              "run + linearised replays, no perturbed runs).\n"
+                              "The adjoint-gradient methods (scalar L-BFGS and per-cell field) have their own entry: "
+                              "'Adjoint gradient' in the method list.");
+                {
+                    ui::propI("Max iterations", &study_.lm.maxIter, 1, 100);
+                    if (study_.hmOpt == 0) ui::propD("Finite-difference step", &study_.lm.fdStep, "%.3g", "Normalised parameter step of the Jacobian columns");
+                    else ui::propD("Residual perturbation", &study_.lm.resStep, "%.3g", "Relative parameter perturbation used to differentiate the discrete residual (central differences of the residual only, not of runs)");
+                    ui::propD("Initial damping", &study_.lm.lambda0, "%.3g");
+                    ui::propD("Tolerance", &study_.lm.tol, "%.3g");
+                    study_.lm.gradient = study_.hmOpt == 1 ? GradientMethod::Analytic : GradientMethod::FiniteDifference;
+                }
+            }
+            if (M == 6) {
+                static const char* kAdjModes[] = {"Scalar parameters (Parameters tab) - projected L-BFGS",
+                                                  "Per-cell field (every active cell: ln k / ln phi multipliers)"};
+                ui::propCombo("Unknowns", &study_.adjMode, kAdjModes, 2,
+                              "Both use the exact discrete adjoint: one forward + one backward pass per iteration gives the "
+                              "misfit gradient for all unknowns, so the cost does not grow with their number.\n"
+                              "Scalar: the active study parameters (multipliers, contacts, kr end points, ...).\n"
+                              "Per-cell: a log-multiplier of the permeability (all directions) and / or porosity of every "
+                              "active cell, regularised by a smoothness term.");
+                if (study_.adjMode == 0) {
+                    ui::propI("Max iterations", &study_.adj.maxIter, 1, 200);
+                    ui::propI("L-BFGS memory", &study_.adj.memory, 1, 30, "Number of curvature pairs kept");
+                    ui::propD("Max step (normalised)", &study_.adj.maxStep, "%.3g", "Largest parameter move per iteration in the normalised [0, 1] box");
+                    ui::propD("Residual perturbation", &study_.adj.resStep, "%.3g");
+                    ui::propD("Tolerance", &study_.adj.tol, "%.3g", "Stop when the projected gradient / relative misfit change falls below this");
+                } else {
+                    FieldHMOptions& fo = study_.fieldOpt;
+                    ui::propBool("Match permeability (kx, ky, kz)", &fo.perm);
+                    ui::propBool("Match porosity", &fo.poro);
+                    ui::propI("Iterations", &fo.maxIter, 1, 200);
+                    ui::propD("Smoothness weight", &fo.regWeight, "%.3g", "weight of the mean squared ln-multiplier jump between neighbouring cells");
+                    ui::propD("Lowest multiplier", &fo.lo, "%.3g");
+                    ui::propD("Highest multiplier", &fo.hi, "%.3g");
+                    ui::propD("Max ln step / iteration", &fo.maxLogStep, "%.3g");
+                    fo.lo = std::max(1e-4, std::min(fo.lo, 1.0)); fo.hi = std::max(1.0, fo.hi);
+                }
             }
             if (M == 4) {
                 ui::propI("Ensemble size", &study_.es.ensemble, 4, 400);
@@ -1164,11 +1317,11 @@ void App::studiesSetup() {
                 ui::propD("Prior spread (logit space)", &study_.es.priorStd, "%.3g");
                 int sd = int(study_.es.seed); if (ui::propI("Seed", &sd, 1, 1 << 30)) study_.es.seed = unsigned(sd);
             }
-            if (M == 3 || M == 4 || M == 5) ui::propCombo("Objective grouping", &study_.grouping, kGroupings, 4, "How observations are grouped into objective terms (cross-plots, Pareto front)");
+            if (M == 3 || M == 4 || M == 5 || (M == 6 && study_.adjMode == 0)) ui::propCombo("Objective grouping", &study_.grouping, kGroupings, 4, "How observations are grouped into objective terms (cross-plots, Pareto front)");
             if (M != 5) ui::propI("Parallel runs (0 = auto)", &study_.workers, 0, hw * 2);
             ui::endProps();
         }
-        if (act == 0) ui::hint("Define and activate parameters in the Parameters tab first.");
+        if (act == 0 && !(M == 6 && study_.adjMode == 1)) ui::hint("Define and activate parameters in the Parameters tab first.");
         if ((M >= 3 || Response(study_.response) == Response::Misfit) && case_.observations.empty())
             ImGui::TextColored(col4(Pal::Warn), ICON_TRIANGLE_ALERT " History matching needs observed data (Observed tab).");
         if (M == 5) {
@@ -1204,15 +1357,30 @@ void App::studiesSetup() {
             else if (M == 1) runs = std::max(4, study_.mcSamples);
             else if (M == 2) runs = int(designPoints(P, DesignKind(study_.designKind), study_.designN, unsigned(study_.seed)).size());
             else if (M == 4) runs = study_.es.ensemble * (study_.es.assimilations + 1);
-            if (M == 3) std::snprintf(b, sizeof(b), ICON_PLAY "  Run %s  (~%d runs / iteration)", kMethods[M], act + 4);
+            if (M == 3 && study_.hmOpt == 0) std::snprintf(b, sizeof(b), ICON_PLAY "  Run %s  (~%d runs / iteration)", kMethods[M], act + 4);
+            else if (M == 3) std::snprintf(b, sizeof(b), ICON_PLAY "  Run %s, analytic Jacobian  (~4 runs / iteration)", kMethods[M]);
+            else if (M == 6 && study_.adjMode == 0) std::snprintf(b, sizeof(b), ICON_PLAY "  Run adjoint L-BFGS  (~1-2 runs / iteration)");
+            else if (M == 6) std::snprintf(b, sizeof(b), ICON_PLAY "  Run per-cell field match  (1 forward + 1 adjoint / iteration)");
             else std::snprintf(b, sizeof(b), ICON_PLAY "  Run %s  (%d runs)", kMethods[M], runs);
-            ImGui::BeginDisabled(study_.running || act == 0);
+            const bool fieldMode = M == 6 && study_.adjMode == 1;
+            ImGui::BeginDisabled(study_.running || (fieldMode ? (case_.observations.empty() || (!study_.fieldOpt.perm && !study_.fieldOpt.poro)) : act == 0));
+            if (fieldMode && ui::accentButton(b, ImVec2(-FLT_MIN, fs * 2.2f))) {
+                const Case base = case_; const FieldHMOptions o = study_.fieldOpt;
+                study_.deferred = [this, base, o]() {
+                    startStudy("Per-cell field history match (adjoint)", [base, o](StudyState& S, const StudyCallbacks& cb) {
+                        FieldHMResult r = runAdjointFieldHM(base, o, cb);
+                        if (!r.ok && cb.log) cb.log("Field HM failed: " + r.error);
+                        std::lock_guard<std::mutex> l(S.m); S.field = std::move(r); S.hasField = true; S.adjLast = 1; S.adjIter = -1; S.centerTab = 11;
+                    });
+                };
+            }
+            if (!fieldMode)
             if (ui::accentButton(b, ImVec2(-FLT_MIN, fs * 2.2f))) {
                 const Case base = case_; const Response r = Response(study_.response); const Economics eco = study_.eco;
                 const int n = std::max(4, study_.mcSamples); const unsigned seed = unsigned(study_.seed);
-                const LMOptions lo = study_.lm; const ESMDAOptions eo = study_.es;
-                const DesignKind dk = DesignKind(study_.designKind); const int dn = study_.designN; const bool quad = study_.proxyQuad, mx = study_.proxyMax;
-                study_.deferred = [this, M, base, r, eco, n, seed, lo, eo, dk, dn, quad, mx]() {
+                const LMOptions lo = study_.lm; const ESMDAOptions eo = study_.es; const AdjointHMOptions ao = study_.adj; const int hopt = M == 6 ? 2 : study_.hmOpt;
+                const DesignKind dk = DesignKind(study_.designKind); const int dn = study_.designN; const bool quad = study_.proxyQuad, mx = study_.proxyMax; const int pkind = study_.proxyKind;
+                study_.deferred = [this, M, base, r, eco, n, seed, lo, eo, ao, hopt, dk, dn, quad, mx, pkind]() {
                     if (M == 0) startStudy("Tornado sensitivity", [base, r, eco](StudyState& S, const StudyCallbacks& cb) {
                         TornadoResult t = runTornado(base, base.studyParams, r, eco, cb);
                         std::lock_guard<std::mutex> l(S.m); S.tornado = std::move(t); S.tornadoResp = r; S.hasTornado = true; S.centerTab = 3;
@@ -1221,7 +1389,7 @@ void App::studiesSetup() {
                         MonteCarloResult m = runMonteCarlo(base, base.studyParams, n, seed, r, eco, cb);
                         std::lock_guard<std::mutex> l(S.m); S.mc = std::move(m); S.mcResp = r; S.hasMC = true; S.centerTab = 4;
                     });
-                    else if (M == 2) startStudy("Experimental design + proxy", [base, r, eco, seed, dk, dn, quad, mx](StudyState& S, const StudyCallbacks& cb) {
+                    else if (M == 2) startStudy("Experimental design + proxy", [base, r, eco, seed, dk, dn, quad, mx, pkind](StudyState& S, const StudyCallbacks& cb) {
                         const auto X = designPoints(base.studyParams, dk, dn, seed);
                         const auto runs = runDesign(base, base.studyParams, X, "design", cb);
                         const auto sig = autoSigma(base.observations);
@@ -1232,7 +1400,7 @@ void App::studiesSetup() {
                             if (!std::isfinite(v)) continue;
                             xs.push_back(X[i]); y.push_back(v);
                         }
-                        ProxyModel pm = fitProxy(base.studyParams, xs, y, quad);
+                        ProxyModel pm = pkind == 1 ? fitProxyGP(base.studyParams, xs, y) : fitProxy(base.studyParams, xs, y, quad);
                         double pred = NAN;
                         std::vector<double> opt = pm.ok ? proxyOptimum(pm, base.studyParams, mx, seed, &pred) : std::vector<double>();
                         if (cb.log) { char b[160]; std::snprintf(b, sizeof(b), "proxy: %d samples, R2 %.4f, Q2 %.4f, RMSE %.4g", pm.samples, pm.r2, pm.q2, pm.rmse); cb.log(b); }
@@ -1240,25 +1408,65 @@ void App::studiesSetup() {
                         S.proxy = std::move(pm); S.designX = std::move(xs); S.designY = std::move(y); S.proxyOpt = std::move(opt); S.proxyPred = pred;
                         S.proxyActual = NAN; S.proxyParams = base.studyParams; S.proxyResp = int(r); S.hasProxy = true; S.centerTab = 6;
                     });
-                    else startStudy(M == 3 ? "Levenberg-Marquardt history match" : "ES-MDA history match", [base, M, lo, eo](StudyState& S, const StudyCallbacks& cb) {
-                        HMResult h = M == 3 ? runLevenbergMarquardt(base, base.studyParams, lo, cb) : runESMDA(base, base.studyParams, eo, cb);
-                        std::lock_guard<std::mutex> l(S.m); S.hm = std::move(h); S.hmMethod = M - 3; S.hmParams = base.studyParams; S.hasHM = true; S.centerTab = 9;
+                    else startStudy(M == 4 ? "ES-MDA history match" : hopt == 2 ? "Adjoint L-BFGS history match" : "Levenberg-Marquardt history match",
+                                    [base, M, lo, eo, ao, hopt](StudyState& S, const StudyCallbacks& cb) {
+                        HMResult h = M == 4 ? runESMDA(base, base.studyParams, eo, cb)
+                                   : hopt == 2 ? runAdjointLBFGS(base, base.studyParams, ao, cb) : runLevenbergMarquardt(base, base.studyParams, lo, cb);
+                        std::lock_guard<std::mutex> l(S.m); S.hm = std::move(h); S.hmMethod = M == 4 ? 1 : 0; S.hmAlgo = M == 4 ? 0 : hopt;
+                        S.hmParams = base.studyParams; S.hasHM = true; S.centerTab = hopt == 2 ? 11 : 9;
+                        if (hopt == 2) { S.adjLast = 0; S.adjIter = -1; }
                     });
                 };
             }
             ImGui::EndDisabled();
             ImGui::TextDisabled("Every run is archived (right pane) and shown in the views.");
+            if (M == 6 && study_.adjMode == 0 && study_.hasHM && study_.hmAlgo == 2 && ImGui::Button(ICON_CHART_LINE " Open the Adjoint HM view")) study_.centerTab = 11;
+            if (M == 3 || (M == 6 && study_.adjMode == 0)) gradientCheckPanel(act);
+            if (fieldMode) {
+                ui::hint("Matches a log-multiplier of the permeability (all directions) and / or porosity of EVERY active cell "
+                         "against the observed data. One forward run + one adjoint pass per iteration gives all gradients "
+                         "(analytic dR/dtheta), so the cost does not grow with the number of cells. A smoothness term keeps "
+                         "the multiplier field geologically plausible.");
+                std::lock_guard<std::mutex> l(study_.m);
+                if (study_.hasField) {
+                    const FieldHMResult& F = study_.field;
+                    if (!F.ok) ImGui::TextColored(col4(Pal::Err), "%s", F.error.c_str());
+                    else {
+                        ImGui::Text("misfit %.4g -> %.4g  (%d iterations, %d runs; forward %.1fs, adjoint %.1fs)", F.initialMisfit, F.bestMisfit,
+                                    F.iterations, F.runs, F.secForward, F.secAdjoint);
+                        if (ImGui::Button(ICON_CHART_LINE " Open the Adjoint HM view")) study_.centerTab = 11;
+                        if (F.history.size() > 1 && ImPlot::BeginPlot("##fhm", ImVec2(-1, fs * 9))) {
+                            ImPlot::SetupAxes("iteration", "misfit", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                            ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                            ImPlot::PlotLine("misfit", F.history.data(), int(F.history.size()));
+                            ImPlot::EndPlot();
+                        }
+                        double kmin = 1e300, kmax = 0;
+                        for (double v : F.multK) { kmin = std::min(kmin, v); kmax = std::max(kmax, v); }
+                        if (!F.multK.empty()) ImGui::TextDisabled("permeability multipliers %.3g .. %.3g", kmin, kmax);
+                        if (ImGui::Button(ICON_CHECK " Apply the matched field to the case")) {
+                            const Case best = F.best;
+                            study_.deferred = [this, best]() {
+                                case_.grid.permx = best.grid.permx; case_.grid.permy = best.grid.permy;
+                                case_.grid.permz = best.grid.permz; case_.grid.poro = best.grid.poro;
+                                markDirty(true);
+                                notify("Matched per-cell permeability / porosity applied to the case - re-run the simulation (F5)");
+                            };
+                        }
+                    }
+                }
+            }
         }
         ImGui::EndChild();
         ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem(ICON_SLIDERS_HORIZONTAL " Parameters")) {
+    if (ui::tabItem(ICON_SLIDERS_HORIZONTAL " Parameters")) {
         ImGui::BeginChild("##par", ImVec2(0, 0), 0, ImGuiWindowFlags_HorizontalScrollbar);
         studyParams();
         ImGui::EndChild();
         ImGui::EndTabItem();
     }
-    if (study_.wsMode == 0 && ImGui::BeginTabItem(ICON_TARGET " Observed")) {
+    if (study_.wsMode == 0 && ui::tabItem(ICON_TARGET " Observed")) {
         ImGui::BeginChild("##obs");
         std::unique_lock<std::mutex> lk(study_.m);
         studyObservations();
@@ -1308,27 +1516,34 @@ void App::studiesCenter() {
     };
 
     // ---- history matching: observed data manager, match quality, parameters
-    if (hmMode && ImGui::BeginTabItem(ICON_TARGET " Observed data", nullptr, tabFlags(8))) {
+    if (hmMode && ui::tabItem(ICON_TARGET " Observed data", nullptr, tabFlags(8))) {
         ImGui::BeginChild("##hmobs");
         studyObservations();
         ImGui::EndChild();
         ImGui::EndTabItem();
     }
-    if (hmMode && ImGui::BeginTabItem(ICON_GRID_3X3 " Match quality", nullptr, tabFlags(9))) {
+    if (hmMode && ui::tabItem(ICON_GRID_3X3 " Match quality", nullptr, tabFlags(9))) {
         ImGui::BeginChild("##hmmq");
         hmMatchQuality();
         ImGui::EndChild();
         ImGui::EndTabItem();
     }
-    if (hmMode && ImGui::BeginTabItem(ICON_SLIDERS_HORIZONTAL " Parameters", nullptr, tabFlags(10))) {
+    if (hmMode && ui::tabItem(ICON_SLIDERS_HORIZONTAL " Parameters", nullptr, tabFlags(10))) {
         ImGui::BeginChild("##hmpar");
         hmParameters();
         ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
+    if (hmMode && ui::tabItem(ICON_ACTIVITY " Adjoint HM", nullptr, tabFlags(11))) {
+        ImGui::BeginChild("##hmadj");
+        adjointHMView();
+        ImGui::EndChild();
+        ImGui::EndTabItem();
+    }
+
     // ---- profiles overlay
-    if (ImGui::BeginTabItem(ICON_CHART_LINE " Profiles", nullptr, tabFlags(0))) {
+    if (ui::tabItem(ICON_CHART_LINE " Profiles", nullptr, tabFlags(0))) {
         ImGui::SetNextItemWidth(fs * 6);
         ImGui::Combo("##ovv", &study_.ovVec, kOvVec, kNumOv, 20);
         const bool wellVec = study_.ovVec >= kOvFirstWell;
@@ -1455,7 +1670,7 @@ void App::studiesCenter() {
     }
 
     // ---- cross-plot: parameter vs misfit / response / objective term
-    if (ImGui::BeginTabItem(ICON_CHART_SCATTER " Cross-plot", nullptr, tabFlags(1))) {
+    if (ui::tabItem(ICON_CHART_SCATTER " Cross-plot", nullptr, tabFlags(1))) {
         std::vector<int> pidx;
         for (int i = 0; i < int(AP.size()); ++i) if (AP[size_t(i)].active) pidx.push_back(i);
         if (A.empty() || pidx.empty()) ui::hint("Run a study first: every run becomes a point (parameter value vs misfit / response / objective term).");
@@ -1523,7 +1738,7 @@ void App::studiesCenter() {
     }
 
     // ---- Pareto front of two objective terms
-    if (hmMode && ImGui::BeginTabItem(ICON_TROPHY " Pareto", nullptr, tabFlags(2))) {
+    if (hmMode && ui::tabItem(ICON_TROPHY " Pareto", nullptr, tabFlags(2))) {
         const auto& T = study_.termNames;
         if (T.size() < 2) ui::hint("The Pareto front needs at least two objective terms: add observations of several quantities / wells and pick an objective grouping (Method tab), then run a study.");
         else {
@@ -1570,7 +1785,7 @@ void App::studiesCenter() {
     }
 
     // ---- tornado
-    if (!hmMode && ImGui::BeginTabItem(ICON_CHART_COLUMN " Tornado", nullptr, tabFlags(3))) {
+    if (!hmMode && ui::tabItem(ICON_CHART_COLUMN " Tornado", nullptr, tabFlags(3))) {
         if (!study_.hasTornado) ui::hint("Run the tornado method to rank the parameters by their one-at-a-time swing.");
         else {
             const TornadoResult& T = study_.tornado;
@@ -1587,14 +1802,14 @@ void App::studiesCenter() {
     }
 
     // ---- Monte Carlo
-    if (!hmMode && ImGui::BeginTabItem(ICON_SHUFFLE " Monte Carlo", nullptr, tabFlags(4))) {
+    if (!hmMode && ui::tabItem(ICON_SHUFFLE " Monte Carlo", nullptr, tabFlags(4))) {
         if (!study_.hasMC) ui::hint("Run the Monte Carlo method: Latin-hypercube samples of all active parameters, P10 / P50 / P90 and rank correlations.");
         else {
             const MonteCarloResult& M = study_.mc;
             ImGui::Text("%s:  P10 %.5g   P50 %.5g   P90 %.5g   mean %.5g   (%d samples, %d failed)", kResp[int(study_.mcResp)], M.p10, M.p50, M.p90, M.mean,
                         int(M.response.size()), M.failed);
             const float h = (ImGui::GetContentRegionAvail().y - fs) * 0.5f;
-            if (ImGui::BeginTable("##mc", 2, ImGuiTableFlags_Resizable)) {
+            if (ui::beginTable("##mc", 2, ImGuiTableFlags_Resizable)) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 std::vector<double> v; for (double x : M.response) if (std::isfinite(x)) v.push_back(x);
@@ -1616,7 +1831,7 @@ void App::studiesCenter() {
                     ImPlot::PlotLine("P50", M.times.data(), M.fanP50.data(), int(M.times.size()), s5);
                     ImPlot::EndPlot();
                 }
-                ImGui::EndTable();
+                ui::endTable();
             }
             std::vector<std::string> lab; std::vector<double> lo, hi;
             std::vector<int> order;
@@ -1630,7 +1845,7 @@ void App::studiesCenter() {
     }
 
     // ---- convergence
-    if (hmMode && ImGui::BeginTabItem(ICON_ACTIVITY " Convergence", nullptr, tabFlags(5))) {
+    if (hmMode && ui::tabItem(ICON_ACTIVITY " Convergence", nullptr, tabFlags(5))) {
         std::vector<double> id, mf, bestSoFar;
         double b = 1e300;
         for (auto& a : A) if (a.ok && std::isfinite(a.misfit) && inFilter(a)) { id.push_back(a.id); mf.push_back(std::max(1e-12, a.misfit)); b = std::min(b, a.misfit); bestSoFar.push_back(std::max(1e-12, b)); }
@@ -1646,7 +1861,7 @@ void App::studiesCenter() {
             ImPlot::PlotStairs("best so far", id.data(), bestSoFar.data(), int(id.size()), sb);
             ImPlot::EndPlot();
         }
-        if (study_.hasHM && !study_.hm.history.empty() && ImPlot::BeginPlot(study_.hmMethod == 0 ? "Levenberg-Marquardt iterations" : "ES-MDA assimilations", ImVec2(-1, -1))) {
+        if (study_.hasHM && !study_.hm.history.empty() && ImPlot::BeginPlot(study_.hmMethod == 0 ? (study_.hmAlgo == 2 ? "Adjoint L-BFGS iterations" : "Levenberg-Marquardt iterations") : "ES-MDA assimilations", ImVec2(-1, -1))) {
             ImPlot::SetupAxes(study_.hmMethod == 0 ? "iteration" : "assimilation", "misfit", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
             ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
             std::vector<double> x, y, sp;
@@ -1659,7 +1874,7 @@ void App::studiesCenter() {
     }
 
     // ---- proxy
-    if (!hmMode && ImGui::BeginTabItem(ICON_SPARKLES " Proxy", nullptr, tabFlags(6))) {
+    if (!hmMode && ui::tabItem(ICON_SPARKLES " Proxy", nullptr, tabFlags(6))) {
         if (!study_.hasProxy) ui::hint("Run 'Experimental design + proxy': training runs from a design, a polynomial response surface, its quality (R2, leave-one-out Q2) and the optimum.");
         else {
             const ProxyModel& PM = study_.proxy;
@@ -1667,11 +1882,11 @@ void App::studiesCenter() {
             if (!PM.ok) ImGui::TextColored(col4(Pal::Err), "The proxy could not be fitted (too few successful runs for the number of parameters).");
             else {
                 const ImU32 q = PM.q2 > 0.9 ? Pal::Ok : PM.q2 > 0.6 ? Pal::Warn : Pal::Err;
-                ImGui::Text("%s proxy of %s from %d runs:", PM.quadratic ? "Quadratic" : "Linear", kResp[study_.proxyResp], PM.samples);
+                ImGui::Text("%s proxy of %s from %d runs:", PM.kind == 1 ? "Gaussian-process" : PM.quadratic ? "Quadratic" : "Linear", kResp[study_.proxyResp], PM.samples);
                 ImGui::SameLine(); ImGui::TextColored(col4(q), "R2 %.4f   Q2 %.4f", PM.r2, PM.q2);
                 ImGui::SameLine(); ImGui::TextDisabled("RMSE %.4g", PM.rmse);
                 const float h = ImGui::GetContentRegionAvail().y * 0.55f;
-                if (ImGui::BeginTable("##px", 2, ImGuiTableFlags_Resizable)) {
+                if (ui::beginTable("##px", 2, ImGuiTableFlags_Resizable)) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
                     if (ImPlot::BeginPlot("Predicted vs simulated", ImVec2(-1, h), ImPlotFlags_Equal)) {
@@ -1703,11 +1918,11 @@ void App::studiesCenter() {
                     std::sort(ord.begin(), ord.end(), [&](int a, int b) { return PM.importance[size_t(a)] > PM.importance[size_t(b)]; });
                     for (int k : ord) { lab.push_back(paramLabel(PP[size_t(PM.act[size_t(k)])], case_)); lo.push_back(NAN); hi.push_back(PM.importance[size_t(k)]); }
                     barChart("##imp", lab, lo, hi, 0.0, "", "effect over the range", false);
-                    ImGui::EndTable();
+                    ui::endTable();
                 }
                 ui::header(study_.proxyMax ? "Proxy optimum (maximum)" : "Proxy optimum (minimum)");
-                if (ImGui::BeginTable("##opt", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                    ImGui::TableSetupColumn("Parameter", 0, 2.2f); ImGui::TableSetupColumn("Base"); ImGui::TableSetupColumn("Optimum");
+                if (ui::beginTable("##opt", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                    ui::tableColumn("Parameter", 0, 2.2f); ui::tableColumn("Base"); ui::tableColumn("Optimum");
                     ImGui::TableHeadersRow();
                     for (size_t i = 0; i < PP.size() && i < study_.proxyOpt.size(); ++i) {
                         if (!PP[i].active) continue;
@@ -1716,9 +1931,13 @@ void App::studiesCenter() {
                         ImGui::TableSetColumnIndex(1); ImGui::Text("%.4g", PP[i].base);
                         ImGui::TableSetColumnIndex(2); ImGui::TextColored(col4(Pal::Accent), "%.4g", study_.proxyOpt[i]);
                     }
-                    ImGui::EndTable();
+                    ui::endTable();
                 }
                 ImGui::Text("Predicted %s: %.5g", kResp[study_.proxyResp], study_.proxyPred);
+                if (PM.kind == 1 && !study_.proxyOpt.empty()) {
+                    const double sd = proxyStd(PM, PP, study_.proxyOpt);
+                    ImGui::SameLine(); ImGui::TextDisabled("+- %.4g (GP 1 sd: add training runs near the optimum if large)", sd);
+                }
                 if (std::isfinite(study_.proxyActual)) {
                     ImGui::SameLine(); ImGui::TextColored(col4(Pal::Ok), "  simulated: %.5g  (error %.2f%%)", study_.proxyActual,
                                                           100.0 * (study_.proxyPred - study_.proxyActual) / std::max(1e-12, std::fabs(study_.proxyActual)));
@@ -1744,7 +1963,7 @@ void App::studiesCenter() {
     }
 
     // ---- log
-    if (ImGui::BeginTabItem(ICON_TERMINAL " Log", nullptr, tabFlags(7))) {
+    if (ui::tabItem(ICON_TERMINAL " Log", nullptr, tabFlags(7))) {
         if (ImGui::SmallButton("Clear")) study_.log.clear();
         ImGui::BeginChild("##wslog", ImVec2(0, 0), ImGuiChildFlags_Borders);
         if (g_fonts.mono) ImGui::PushFont(g_fonts.mono, 0.0f);
@@ -1776,14 +1995,14 @@ void App::studiesRuns() {
     const float tableH = ImGui::GetContentRegionAvail().y * 0.55f;
     static std::vector<int> order;
     static unsigned orderVer = ~0u; static int sortCol = 2; static bool sortAsc = true;
-    if (ImGui::BeginTable("##runs", ncol, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX |
+    if (ui::beginTable("##runs", ncol, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX |
                                               ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable, ImVec2(0, tableH))) {
         ImGui::TableSetupScrollFreeze(1, 1);
-        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_DefaultSort);
-        ImGui::TableSetupColumn("Tag");
-        ImGui::TableSetupColumn("Misfit", ImGuiTableColumnFlags_PreferSortAscending);
-        ImGui::TableSetupColumn("Response");
-        for (int i : pcols) ImGui::TableSetupColumn(paramLabel(AP[size_t(i)], case_).c_str());
+        ui::tableColumn("#", ImGuiTableColumnFlags_DefaultSort);
+        ui::tableColumn("Tag");
+        ui::tableColumn("Misfit", ImGuiTableColumnFlags_PreferSortAscending);
+        ui::tableColumn("Response");
+        for (int i : pcols) ui::tableColumn(paramLabel(AP[size_t(i)], case_).c_str());
         ImGui::TableHeadersRow();
         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
             if (ss->SpecsDirty && ss->SpecsCount > 0) { sortCol = ss->Specs[0].ColumnIndex; sortAsc = ss->Specs[0].SortDirection == ImGuiSortDirection_Ascending; orderVer = ~0u; ss->SpecsDirty = false; }
@@ -1820,7 +2039,7 @@ void App::studiesRuns() {
                     if (size_t(pcols[c]) < a.values.size()) ImGui::Text("%.4g", a.values[size_t(pcols[c])]);
                 }
             }
-        ImGui::EndTable();
+        ui::endTable();
     }
     if (ImGui::SmallButton(ICON_DOWNLOAD " Export CSV")) {
         std::string path = "run_archive.csv";
@@ -1854,7 +2073,7 @@ void App::studiesRuns() {
         ImGui::Text("Misfit %.5g    Response %.6g", s->misfit, s->response);
         ImGui::TextDisabled("%d time steps, %d Newton, %.2f s", s->run.stats.timesteps, s->run.stats.newton, s->run.stats.seconds);
     }
-    if (ImGui::BeginTable("##rv", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+    if (ui::beginTable("##rv", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         for (size_t i = 0; i < AP.size() && i < s->values.size(); ++i) {
             if (!AP[i].active) continue;
             ImGui::TableNextRow();
@@ -1866,7 +2085,7 @@ void App::studiesRuns() {
             ImGui::TableSetColumnIndex(0); ImGui::TextDisabled("term %s", study_.termNames[i].c_str());
             ImGui::TableSetColumnIndex(1); ImGui::Text("%.4g", s->terms[i]);
         }
-        ImGui::EndTable();
+        ui::endTable();
     }
     if (s->ok && ui::accentButton(ICON_CHECK " Apply to case")) applyStudyValues(AP, s->values, "Run #" + std::to_string(s->id));
     ImGui::SameLine();
@@ -1934,7 +2153,11 @@ void App::obsImportSummaryPopup() {
 void App::hmColumns(std::vector<std::string>& names, std::vector<const RunResult*>& runs, RunResult& lastHolder) {
     names.clear(); runs.clear();
     if (study_.hasHM && study_.hm.initialRun.ok) { names.push_back("Initial"); runs.push_back(&study_.hm.initialRun); }
-    if (study_.hasHM && study_.hm.bestRun.ok) { names.push_back(study_.hmMethod == 0 ? "Best (LM)" : "Best (ES-MDA)"); runs.push_back(&study_.hm.bestRun); }
+    if (study_.hasHM && study_.hm.bestRun.ok) { names.push_back(std::string("Best (") + hmName(true) + ")"); runs.push_back(&study_.hm.bestRun); }
+    if (study_.hasField && study_.field.ok && study_.field.bestRun.ok) {   // C13: per-cell adjoint field match
+        if (!(study_.hasHM && study_.hm.initialRun.ok) && study_.field.initialRun.ok) { names.push_back("Initial"); runs.push_back(&study_.field.initialRun); }
+        names.push_back("Best (field adjoint)"); runs.push_back(&study_.field.bestRun);
+    }
     if (study_.hasManual && study_.manual.ok) { names.push_back("Manual"); runs.push_back(&study_.manual); }
     for (auto& a : study_.archive)
         if (a.id == study_.selRun && a.ok) { names.push_back("Run #" + std::to_string(a.id)); runs.push_back(&a.run); }
@@ -2019,13 +2242,13 @@ void App::hmMatchQuality() {
     const float tableH = std::max(fs * 8, (ImGui::GetContentRegionAvail().y) * 0.48f);
     if (study_.mqView == 0) {
         const int nc = 2 + int(runs.size()) + (runs.size() >= 2 ? 1 : 0);
-        if (ImGui::BeginTable("mq", nc, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable |
+        if (ui::beginTable("mq", nc, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable |
                                             ImGuiTableFlags_SizingStretchProp, ImVec2(0, tableH))) {
             ImGui::TableSetupScrollFreeze(1, 1);
-            ImGui::TableSetupColumn("Series", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-            ImGui::TableSetupColumn("Points", ImGuiTableColumnFlags_WidthStretch, 0.7f);
-            for (auto& n : names) ImGui::TableSetupColumn(n.c_str(), ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            if (runs.size() >= 2) ImGui::TableSetupColumn("Change", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+            ui::tableColumn("Series", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+            ui::tableColumn("Points", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+            for (auto& n : names) ui::tableColumn(n.c_str(), ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            if (runs.size() >= 2) ui::tableColumn("Change", ImGuiTableColumnFlags_WidthStretch, 0.9f);
             ImGui::TableHeadersRow();
             // order: sort by the selected column (default: worst series of the last compared run first)
             std::vector<int> order(groups.size()); std::iota(order.begin(), order.end(), 0);
@@ -2062,7 +2285,7 @@ void App::hmMatchQuality() {
                         } else ImGui::TextDisabled("-");
                     }
                 }
-            ImGui::EndTable();
+            ui::endTable();
         }
     } else {
         // wells x quantities heat map of one run
@@ -2073,12 +2296,12 @@ void App::hmMatchQuality() {
             if (std::find(qtys.begin(), qtys.end(), int(g.qty)) == qtys.end()) qtys.push_back(int(g.qty));
         }
         std::sort(qtys.begin(), qtys.end());
-        if (ImGui::BeginTable("mqh", 1 + int(qtys.size()) + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX,
+        if (ui::beginTable("mqh", 1 + int(qtys.size()) + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX,
                               ImVec2(0, tableH))) {
             ImGui::TableSetupScrollFreeze(1, 1);
-            ImGui::TableSetupColumn("Well", ImGuiTableColumnFlags_WidthFixed, fs * 7);
-            for (int q : qtys) ImGui::TableSetupColumn(kObsNames[q], ImGuiTableColumnFlags_WidthFixed, fs * 4.2f);
-            ImGui::TableSetupColumn("Well RMS", ImGuiTableColumnFlags_WidthFixed, fs * 5);
+            ui::tableColumn("Well", ImGuiTableColumnFlags_WidthFixed, fs * 7);
+            for (int q : qtys) ui::tableColumn(kObsNames[q], ImGuiTableColumnFlags_WidthFixed, fs * 4.2f);
+            ui::tableColumn("Well RMS", ImGuiTableColumnFlags_WidthFixed, fs * 5);
             ImGui::TableHeadersRow();
             const auto& R = C.rms[size_t(study_.mqRun)];
             for (auto& w : wells) {
@@ -2101,7 +2324,7 @@ void App::hmMatchQuality() {
                 ImGui::TableSetColumnIndex(1 + int(qtys.size()));
                 if (n) { const double v = std::sqrt(s / n); ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, misfitColour(v)); ImGui::Text("%.2g", v); }
             }
-            ImGui::EndTable();
+            ui::endTable();
         }
     }
     // ---- profile of the selected series for every compared run
@@ -2120,17 +2343,17 @@ void App::hmParameters() {
     const auto& H = study_.hm; const auto& P = study_.hmParams;
     const bool ens = study_.hmMethod == 1 && !H.ensemble.empty();
     std::vector<int> act; for (int i = 0; i < int(P.size()); ++i) if (P[size_t(i)].active) act.push_back(i);
-    ImGui::Text("%s: misfit %.4g -> %.4g  (%d simulations)", study_.hmMethod == 0 ? "Levenberg-Marquardt" : "ES-MDA", H.initialMisfit, H.bestMisfit, H.runs);
+    ImGui::Text("%s: misfit %.4g -> %.4g  (%d simulations)", hmName(false), H.initialMisfit, H.bestMisfit, H.runs);
     ImGui::SameLine(0, fs * 2);
     if (ui::accentButton(ICON_CHECK " Apply best values to the model")) {
         auto hp = P; auto v = H.best;
         study_.deferred = [this, hp, v] { applyStudyValues(hp, v, "history-match result"); };
     }
     const int nc = ens ? 8 : 5;
-    if (ImGui::BeginTable("hmp", nc, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Parameter", 0, 2.2f); ImGui::TableSetupColumn("Range", 0, 1.4f); ImGui::TableSetupColumn("Base", 0, 0.9f);
-        ImGui::TableSetupColumn(ens ? "Best member" : "Matched", 0, 0.9f); ImGui::TableSetupColumn("Position in range", 0, 2.6f);
-        if (ens) { ImGui::TableSetupColumn("P10", 0, 0.8f); ImGui::TableSetupColumn("P50", 0, 0.8f); ImGui::TableSetupColumn("P90", 0, 0.8f); }
+    if (ui::beginTable("hmp", nc, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ui::tableColumn("Parameter", 0, 2.2f); ui::tableColumn("Range", 0, 1.4f); ui::tableColumn("Base", 0, 0.9f);
+        ui::tableColumn(ens ? "Best member" : "Matched", 0, 0.9f); ui::tableColumn("Position in range", 0, 2.6f);
+        if (ens) { ui::tableColumn("P10", 0, 0.8f); ui::tableColumn("P50", 0, 0.8f); ui::tableColumn("P90", 0, 0.8f); }
         ImGui::TableHeadersRow();
         for (int i : act) {
             const StudyParam& p = P[size_t(i)];
@@ -2164,9 +2387,10 @@ void App::hmParameters() {
                 ImGui::TableSetColumnIndex(7); ImGui::TextUnformatted(fmtv(p90).c_str());
             }
         }
-        ImGui::EndTable();
+        ui::endTable();
     }
     ImGui::TextDisabled("grey dot = base value, blue triangle = matched value%s", ens ? ", band = posterior P10 - P90" : "");
+    hmStatsPanel();
     const float h = std::max(fs * 10, ImGui::GetContentRegionAvail().y - 4);
     if (ens) {
         // posterior histograms, prior range as the x axis
@@ -2192,7 +2416,7 @@ void App::hmParameters() {
             }
             ImPlot::EndSubplots();
         }
-    } else if (!H.history.empty() && ImPlot::BeginPlot("Levenberg-Marquardt search path (normalised parameter position)", ImVec2(-1, h))) {
+    } else if (!H.history.empty() && ImPlot::BeginPlot(study_.hmAlgo == 2 ? "Adjoint L-BFGS search path (normalised parameter position)" : "Levenberg-Marquardt search path (normalised parameter position)", ImVec2(-1, h))) {
         ImPlot::SetupAxes("iteration", "position in range (0 = low, 1 = high)", ImPlotAxisFlags_AutoFit, 0);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.02, 1.02, ImPlotCond_Always);
         int ci = 0;
@@ -2203,5 +2427,644 @@ void App::hmParameters() {
             if (!x.empty()) ImPlot::PlotLine(paramLabel(P[size_t(i)], case_).c_str(), x.data(), y.data(), int(x.size()), s);
         }
         ImPlot::EndPlot();
+    }
+}
+
+// ============================================================================ C13: Adjoint HM view (centre tab 11)
+// Dedicated result view of the adjoint-gradient history matching: scalar parameters (projected L-BFGS) or the per-cell
+// field (ln k / ln phi multiplier of every active cell). Sub-views: iterations (misfit, gradient norm, runs, time per
+// accepted iterate), final parameters / field maps per layer at any iteration (with a 3D-viewer export), per-response
+// check of initial / selected iterate / best (normalised RMS per observation series + overlay plots) and the gradient
+// (sensitivity) of the misfit.
+void App::adjointHMView() {
+    const float fs = ImGui::GetFontSize();
+    const bool hasS = study_.hasHM && study_.hmMethod == 0 && study_.hmAlgo == 2 && study_.hm.ok;
+    const bool hasF = study_.hasField && study_.field.ok;
+    if (!hasS && !hasF) {
+        ui::hint("No adjoint history match yet. Method tab > 'Adjoint gradient (L-BFGS / per-cell field)':\n"
+                 " - Scalar parameters: the active study parameters, projected L-BFGS on the exact adjoint gradient.\n"
+                 " - Per-cell field: ln k / ln phi multipliers of every active cell with a smoothness term.\n"
+                 "This view then shows the iterations, the final parameters / field maps, every response of the best case\n"
+                 "against the observed data and the misfit sensitivities.");
+        if (study_.hasField && !study_.field.ok) ImGui::TextColored(col4(Pal::Err), "Last field match failed: %s", study_.field.error.c_str());
+        return;
+    }
+    // which result
+    if (hasS && hasF) {
+        ImGui::TextDisabled("Result:"); ImGui::SameLine();
+        if (ImGui::RadioButton("Scalar parameters (L-BFGS)", study_.adjLast == 0)) { study_.adjLast = 0; study_.adjIter = -1; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Per-cell field", study_.adjLast == 1)) { study_.adjLast = 1; study_.adjIter = -1; }
+    } else study_.adjLast = hasF ? 1 : 0;
+    const bool field = study_.adjLast == 1;
+    const HMResult& H = study_.hm;
+    const FieldHMResult& F = study_.field;
+    const int nIt = field ? int(F.iters.size()) : int(H.history.size());
+    if (study_.adjIter < 0 || study_.adjIter >= nIt) study_.adjIter = std::max(0, nIt - 1);
+    const int K = study_.adjIter;
+    // ---- headline
+    {
+        const double m0 = field ? F.initialMisfit : H.initialMisfit, mb = field ? F.bestMisfit : H.bestMisfit;
+        const int runs = field ? F.runs : H.runs;
+        ImGui::BeginGroup(); ImGui::TextDisabled("Initial misfit");
+        if (g_fonts.title) ImGui::PushFont(g_fonts.title, 0.0f);
+        ImGui::Text("%.4g", m0);
+        if (g_fonts.title) ImGui::PopFont();
+        ImGui::EndGroup(); ImGui::SameLine(0, fs * 2);
+        ImGui::BeginGroup(); ImGui::TextDisabled("Best misfit");
+        if (g_fonts.title) ImGui::PushFont(g_fonts.title, 0.0f);
+        ImGui::TextColored(col4(Pal::Accent), "%.4g", mb);
+        if (g_fonts.title) ImGui::PopFont();
+        ImGui::EndGroup(); ImGui::SameLine(0, fs * 2);
+        ImGui::BeginGroup(); ImGui::TextDisabled("Reduction");
+        if (g_fonts.title) ImGui::PushFont(g_fonts.title, 0.0f);
+        ImGui::Text("%.1f %%", m0 > 0 ? 100.0 * (1.0 - mb / m0) : 0.0);
+        if (g_fonts.title) ImGui::PopFont();
+        ImGui::EndGroup(); ImGui::SameLine(0, fs * 2);
+        ImGui::BeginGroup(); ImGui::TextDisabled("Cost");
+        ImGui::Text("%d iterations, %d simulations", std::max(0, nIt - 1), runs);
+        if (field) ImGui::TextDisabled("forward %.1f s, adjoint %.1f s", F.secForward, F.secAdjoint);
+        else if (!H.history.empty()) ImGui::TextDisabled("wall %.1f s", H.history.back().seconds);
+        ImGui::EndGroup();
+        if (field) { ImGui::SameLine(0, fs * 2); ImGui::BeginGroup(); ImGui::TextDisabled("Unknowns"); ImGui::Text("%d x %d x %d cells", F.nx, F.ny, F.nz); ImGui::EndGroup(); }
+    }
+    // iteration selector (shared by every sub-view)
+    if (nIt > 1) {
+        ImGui::SetNextItemWidth(fs * 16);
+        ImGui::SliderInt("Iteration", &study_.adjIter, 0, nIt - 1, study_.adjIter == 0 ? "0 (prior)" : "%d");
+        ImGui::SameLine(); ImGui::TextDisabled("selected iterate is compared with the prior and the best match");
+    }
+    const RunResult* r0 = field ? &F.initialRun : &H.initialRun;
+    const RunResult* rb = field ? &F.bestRun : &H.bestRun;
+    const RunResult* rk = nullptr;
+    if (field && K < int(F.iters.size()) && F.iters[size_t(K)].run.ok) rk = &F.iters[size_t(K)].run;
+    if (!field && K < int(H.history.size()) && H.history[size_t(K)].run.ok) rk = &H.history[size_t(K)].run;
+
+    if (!ImGui::BeginTabBar("##adjsub")) return;
+    // ------------------------------------------------------------------ iterations
+    if (ui::tabItem(ICON_TRENDING_UP " Iterations")) {
+        const float h = std::max(fs * 12, ImGui::GetContentRegionAvail().y * 0.45f);
+        if (ImPlot::BeginSubplots("##adjit", 1, 2, ImVec2(-1, h))) {
+            std::vector<double> it, mis, gn, obj, reg;
+            for (int k = 0; k < nIt; ++k) {
+                it.push_back(k);
+                if (field) { const auto& I = F.iters[size_t(k)]; mis.push_back(I.misfit); gn.push_back(I.gradNorm); obj.push_back(I.objective); reg.push_back(I.reg); }
+                else { const auto& I = H.history[size_t(k)]; mis.push_back(I.misfit); gn.push_back(I.gradNorm); }
+            }
+            if (ImPlot::BeginPlot("Misfit and gradient norm")) {
+                ImPlot::SetupAxes("iteration", "misfit", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                ImPlot::SetupAxis(ImAxis_Y2, "|gradient|", ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_AuxDefault);
+                ImPlot::SetupAxisScale(ImAxis_Y2, ImPlotScale_Log10);
+                auto pos = [](std::vector<double> v) { for (double& x : v) x = std::max(x, 1e-30); return v; };
+                const auto mp = pos(mis), gp = pos(gn);
+                ImPlotSpec sp; sp.LineColor = col4(Pal::Accent); sp.LineWeight = 2.5f; sp.Marker = ImPlotMarker_Circle; sp.MarkerSize = 3.5f;
+                ImPlot::PlotLine("data misfit", it.data(), mp.data(), nIt, sp);
+                if (field) {
+                    const auto op = pos(obj);
+                    ImPlotSpec so; so.LineColor = ImVec4(1, 1, 1, 0.6f); so.LineWeight = 1.2f;
+                    ImPlot::PlotLine("objective (misfit + smoothness)", it.data(), op.data(), nIt, so);
+                }
+                ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+                ImPlotSpec sg; sg.LineColor = ImVec4(0.55f, 0.75f, 1.0f, 1); sg.LineWeight = 1.6f; sg.Marker = ImPlotMarker_Square; sg.MarkerSize = 2.5f;
+                ImPlot::PlotLine("gradient norm", it.data(), gp.data(), nIt, sg);
+                ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+                const double kx = K;
+                ImPlotSpec sc; sc.LineColor = ImVec4(1, 1, 1, 0.35f); sc.Flags = ImPlotItemFlags_NoLegend;
+                ImPlot::PlotInfLines("##sel", &kx, 1, sc);
+                if (ImPlot::IsPlotHovered() && ImGui::IsMouseClicked(0)) study_.adjIter = std::clamp(int(std::lround(ImPlot::GetPlotMousePos().x)), 0, nIt - 1);
+                ImPlot::EndPlot();
+            }
+            if (field) {
+                if (ImPlot::BeginPlot("Multiplier range per iteration")) {
+                    ImPlot::SetupAxes("iteration", "multiplier", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                    ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                    std::vector<double> kmin, kmax, kmean, pmin, pmax, pmean;
+                    for (const auto& I : F.iters) { kmin.push_back(I.kMin); kmax.push_back(I.kMax); kmean.push_back(I.kMean); pmin.push_back(I.phiMin); pmax.push_back(I.phiMax); pmean.push_back(I.phiMean); }
+                    ImPlotSpec sk; sk.FillColor = ImVec4(1.0f, 0.6f, 0.2f, 1); sk.FillAlpha = 0.25f;
+                    ImPlot::PlotShaded("k range", it.data(), kmin.data(), kmax.data(), nIt, sk);
+                    ImPlotSpec lk; lk.LineColor = ImVec4(1.0f, 0.6f, 0.2f, 1); lk.LineWeight = 2.0f;
+                    ImPlot::PlotLine("k mean", it.data(), kmean.data(), nIt, lk);
+                    if (!F.multPhi.empty()) {
+                        ImPlotSpec sp2; sp2.FillColor = ImVec4(0.4f, 0.8f, 0.5f, 1); sp2.FillAlpha = 0.25f;
+                        ImPlot::PlotShaded("phi range", it.data(), pmin.data(), pmax.data(), nIt, sp2);
+                        ImPlotSpec lp; lp.LineColor = ImVec4(0.4f, 0.8f, 0.5f, 1); lp.LineWeight = 2.0f;
+                        ImPlot::PlotLine("phi mean", it.data(), pmean.data(), nIt, lp);
+                    }
+                    ImPlot::EndPlot();
+                }
+            } else if (ImPlot::BeginPlot("Normalised parameters per iteration")) {
+                ImPlot::SetupAxes("iteration", "u = position in [low, high]", ImPlotAxisFlags_AutoFit, 0);
+                ImPlot::SetupAxisLimits(ImAxis_Y1, -0.02, 1.02, ImPlotCond_Always);
+                const auto& P = study_.hmParams;
+                int ci = 0;
+                for (size_t i = 0; i < P.size(); ++i) {
+                    if (!P[i].active) continue;
+                    std::vector<double> u;
+                    for (const auto& I : H.history) u.push_back(i < I.values.size() ? paramToUnit(P[i], I.values[i]) : NAN);
+                    ImPlotSpec s; s.LineColor = col4(seriesCol(ci++)); s.LineWeight = 2.0f; s.Marker = ImPlotMarker_Circle; s.MarkerSize = 2.5f;
+                    ImPlot::PlotLine(paramLabel(P[i], case_).c_str(), it.data(), u.data(), nIt, s);
+                }
+                ImPlot::EndPlot();
+            }
+            ImPlot::EndSubplots();
+        }
+        // table
+        const ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+        const int nc = field ? 11 : 6;
+        if (ui::beginTable("##adjtab", nc, tf, ImVec2(0, std::max(fs * 8, ImGui::GetContentRegionAvail().y)))) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            if (field) for (const char* c : {"Iter", "Misfit", "Objective", "Smoothness", "|grad|", "ln step", "k min", "k max", "k mean", "Runs", "Time (s)"}) ui::tableColumn(c);
+            else for (const char* c : {"Iter", "Misfit", "|grad|", "Runs", "Time (s)", "Reduction vs prior"}) ui::tableColumn(c);
+            ImGui::TableHeadersRow();
+            for (int k = 0; k < nIt; ++k) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                char b[24]; std::snprintf(b, sizeof b, "%d", k);
+                if (ImGui::Selectable(b, k == K, ImGuiSelectableFlags_SpanAllColumns)) study_.adjIter = k;
+                if (field) {
+                    const auto& I = F.iters[size_t(k)];
+                    ImGui::TableNextColumn(); ImGui::Text("%.5g", I.misfit);
+                    ImGui::TableNextColumn(); ImGui::Text("%.5g", I.objective);
+                    ImGui::TableNextColumn(); ImGui::Text("%.4g", I.reg);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.gradNorm);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.step);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.kMin);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.kMax);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.kMean);
+                    ImGui::TableNextColumn(); ImGui::Text("%d", I.runs);
+                    ImGui::TableNextColumn(); ImGui::Text("%.1f", I.seconds);
+                } else {
+                    const auto& I = H.history[size_t(k)];
+                    ImGui::TableNextColumn(); ImGui::Text("%.5g", I.misfit);
+                    ImGui::TableNextColumn(); ImGui::Text("%.3g", I.gradNorm);
+                    ImGui::TableNextColumn(); ImGui::Text("%d", I.runs);
+                    ImGui::TableNextColumn(); ImGui::Text("%.1f", I.seconds);
+                    ImGui::TableNextColumn(); ImGui::Text("%.1f %%", H.initialMisfit > 0 ? 100.0 * (1 - I.misfit / H.initialMisfit) : 0.0);
+                }
+            }
+            ui::endTable();
+        }
+        ImGui::EndTabItem();
+    }
+
+    // ------------------------------------------------------------------ final parameters / field maps
+    if (ui::tabItem(field ? ICON_GRID_3X3 " Field maps" : ICON_SLIDERS_HORIZONTAL " Final parameters")) {
+        if (!field) {
+            const auto& P = study_.hmParams;
+            const auto& vk = K < int(H.history.size()) ? H.history[size_t(K)].values : H.best;
+            const ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp;
+            if (ui::beginTable("##adjpar", 8, tf)) {
+                for (const char* c : {"Parameter", "Low", "High", "Prior (base)", "Iterate", "Best", "u best", "d misfit / du (iterate)"}) ui::tableColumn(c);
+                ImGui::TableHeadersRow();
+                for (size_t i = 0; i < P.size(); ++i) {
+                    if (!P[i].active) continue;
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn(); ImGui::TextUnformatted(paramLabel(P[i], case_).c_str());
+                    ImGui::TableNextColumn(); ImGui::Text("%.4g", P[i].low);
+                    ImGui::TableNextColumn(); ImGui::Text("%.4g", P[i].high);
+                    ImGui::TableNextColumn(); ImGui::Text("%.4g", P[i].base);
+                    ImGui::TableNextColumn(); ImGui::Text("%.4g", i < vk.size() ? vk[i] : NAN);
+                    ImGui::TableNextColumn(); ImGui::TextColored(col4(Pal::Accent), "%.4g", i < H.best.size() ? H.best[i] : NAN);
+                    const double u = i < H.best.size() ? paramToUnit(P[i], H.best[i]) : NAN;
+                    ImGui::TableNextColumn();
+                    ImGui::ProgressBar(float(std::clamp(std::isfinite(u) ? u : 0.0, 0.0, 1.0)), ImVec2(-FLT_MIN, 0), fmtv(u).c_str());
+                    ImGui::TableNextColumn();
+                    const auto& g = K < int(H.history.size()) ? H.history[size_t(K)].grad : std::vector<double>();
+                    if (i < g.size() && std::isfinite(g[i])) ImGui::Text("%.4g", g[i]); else ImGui::TextDisabled("-");
+                }
+                ui::endTable();
+            }
+            if (ImGui::Button(ICON_CHECK " Apply the best parameters to the case")) {
+                const auto Pc = P; const auto best = H.best;
+                study_.deferred = [this, Pc, best]() { applyStudyValues(Pc, best, "Adjoint L-BFGS best match"); };
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(K >= int(H.history.size()));
+            if (ImGui::Button("Apply the selected iterate")) {
+                const auto Pc = P; const auto v = H.history[size_t(K)].values;
+                study_.deferred = [this, Pc, v]() { applyStudyValues(Pc, v, "Adjoint L-BFGS iterate"); };
+            }
+            ImGui::EndDisabled();
+            // prior vs best positions in the normalised box
+            if (ImPlot::BeginPlot("##adjbox", ImVec2(-1, std::max(fs * 10, ImGui::GetContentRegionAvail().y)))) {
+                std::vector<double> u0, ub, uk; std::vector<std::string> names;
+                for (size_t i = 0; i < P.size(); ++i) {
+                    if (!P[i].active) continue;
+                    names.push_back(paramLabel(P[i], case_));
+                    u0.push_back(paramToUnit(P[i], P[i].base));
+                    uk.push_back(i < vk.size() ? paramToUnit(P[i], vk[i]) : 0);
+                    ub.push_back(i < H.best.size() ? paramToUnit(P[i], H.best[i]) : 0);
+                }
+                std::vector<const char*> lab; for (auto& n : names) lab.push_back(n.c_str());
+                std::vector<double> pos(names.size()); for (size_t i = 0; i < pos.size(); ++i) pos[i] = double(i);
+                ImPlot::SetupAxes(nullptr, "u = position in [low, high]", ImPlotAxisFlags_AutoFit, 0);
+                ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 1, ImPlotCond_Always);
+                if (!pos.empty()) ImPlot::SetupAxisTicks(ImAxis_X1, pos.data(), int(pos.size()), lab.data());
+                const int n = int(names.size());
+                ImPlotSpec s0; s0.FillColor = ImVec4(0.6f, 0.6f, 0.65f, 1);
+                ImPlot::PlotBars("prior", u0.data(), n, 0.25, -0.27, s0);
+                ImPlotSpec sk; sk.FillColor = ImVec4(0.55f, 0.75f, 1.0f, 1);
+                ImPlot::PlotBars("iterate", uk.data(), n, 0.25, 0.0, sk);
+                ImPlotSpec sb; sb.FillColor = col4(Pal::Accent);
+                ImPlot::PlotBars("best", ub.data(), n, 0.25, 0.27, sb);
+                ImPlot::EndPlot();
+            }
+        } else {
+            static const char* qn[] = {"ln k multiplier", "ln phi multiplier", "d misfit / d ln k  (prior)", "d misfit / d ln k  (final)",
+                                       "d misfit / d ln phi  (prior)", "d misfit / d ln phi  (final)"};
+            ImGui::SetNextItemWidth(fs * 14); ImGui::Combo("Map", &study_.adjFieldQty, qn, 6);
+            ImGui::SameLine();
+            const int nz = std::max(1, F.nz), nx = std::max(1, F.nx), ny = std::max(1, F.ny);
+            study_.adjLayer = std::clamp(study_.adjLayer, 0, nz - 1);
+            ImGui::SetNextItemWidth(fs * 10); ImGui::SliderInt("Layer (K)", &study_.adjLayer, 0, nz - 1, "%d");
+            const int q = study_.adjFieldQty;
+            const std::vector<float>* src = nullptr;
+            if (q == 0 && K < int(F.iters.size())) src = &F.iters[size_t(K)].lnK;
+            else if (q == 1 && K < int(F.iters.size())) src = &F.iters[size_t(K)].lnPhi;
+            else if (q == 2) src = &F.gradK0; else if (q == 3) src = &F.gradK; else if (q == 4) src = &F.gradPhi0; else if (q == 5) src = &F.gradPhi;
+            const size_t ncell = size_t(nx) * size_t(ny) * size_t(nz);
+            if (!src || src->size() < ncell) ui::hint("This map is not available (quantity not matched in this run).");
+            else {
+                std::vector<double> v(size_t(nx) * size_t(ny), 0.0);
+                double m = 0;
+                for (int j = 0; j < ny; ++j)
+                    for (int i = 0; i < nx; ++i) {
+                        const float x = (*src)[size_t(i) + size_t(nx) * (size_t(j) + size_t(ny) * size_t(study_.adjLayer))];
+                        const double d = std::isfinite(x) ? double(x) : 0.0;
+                        v[size_t(j) * size_t(nx) + size_t(i)] = d; m = std::max(m, std::fabs(d));
+                    }
+                // symmetric range over all layers of this quantity (comparable layers)
+                double mAll = 0; for (size_t c = 0; c < ncell; ++c) if (std::isfinite((*src)[c])) mAll = std::max(mAll, double(std::fabs((*src)[c])));
+                if (mAll <= 0) mAll = 1;
+                const float avW = ImGui::GetContentRegionAvail().x;
+                const float hh = std::max(fs * 14, ImGui::GetContentRegionAvail().y - fs * 3);
+                ImPlot::PushColormap(ImPlotColormap_RdBu);
+                if (ImPlot::BeginPlot("##adjmap", ImVec2(avW * 0.62f, hh), ImPlotFlags_Equal | ImPlotFlags_NoLegend)) {
+                    ImPlot::SetupAxes("I", "J (row 1 at the top)", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                    ImPlot::PlotHeatmap("##hm", v.data(), ny, nx, -mAll, mAll, nullptr, ImPlotPoint(0, 0), ImPlotPoint(nx, ny));
+                    if (ImPlot::IsPlotHovered()) {
+                        const ImPlotPoint mp = ImPlot::GetPlotMousePos();
+                        const int i = int(std::floor(mp.x)), jr = int(std::floor(mp.y));
+                        const int j = ny - 1 - jr;
+                        if (i >= 0 && i < nx && j >= 0 && j < ny) {
+                            const double d = v[size_t(j) * size_t(nx) + size_t(i)];
+                            if (q <= 1) ImGui::SetTooltip("cell (%d, %d, %d)\nln m = %.4g   multiplier = %.4g", i + 1, j + 1, study_.adjLayer + 1, d, std::exp(d));
+                            else ImGui::SetTooltip("cell (%d, %d, %d)\n%s = %.4g", i + 1, j + 1, study_.adjLayer + 1, qn[q], d);
+                        }
+                    }
+                    ImPlot::EndPlot();
+                }
+                ImGui::SameLine();
+                ImPlot::ColormapScale(q <= 1 ? "ln multiplier" : "gradient", -mAll, mAll, ImVec2(fs * 5, hh), "%.3g");
+                ImPlot::PopColormap();
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                // histogram of the active-cell values
+                std::vector<double> all;
+                for (size_t c = 0; c < ncell; ++c) if (std::isfinite((*src)[c]) && (*src)[c] != 0.0f) all.push_back((*src)[c]);
+                if (!all.empty() && ImPlot::BeginPlot("Distribution (all layers)", ImVec2(-1, hh * 0.6f), ImPlotFlags_NoLegend)) {
+                    ImPlot::SetupAxes(q <= 1 ? "ln multiplier" : "gradient", "cells", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                    ImPlotSpec hs; hs.FillColor = col4(Pal::Accent);
+                    ImPlot::PlotHistogram("##h", all.data(), int(all.size()), 30, 1.0, ImPlotRange(), hs);
+                    ImPlot::EndPlot();
+                }
+                ImGui::TextDisabled("layer max |value| %.3g, all layers %.3g", m, mAll);
+                ImGui::TextDisabled("Blue = increase (multiplier > 1 /\npositive gradient), red = decrease");
+                if (ImGui::Button(ICON_ROTATE_3D " Show in the 3D viewer")) {
+                    std::vector<float> mk(ncell, NAN), mp(ncell, NAN), sk(ncell, NAN);
+                    const auto& I = F.iters[size_t(std::min(K, int(F.iters.size()) - 1))];
+                    for (size_t c = 0; c < ncell; ++c) {
+                        if (c < I.lnK.size() && std::isfinite(I.lnK[c])) mk[c] = std::exp(I.lnK[c]);
+                        if (c < I.lnPhi.size() && std::isfinite(I.lnPhi[c])) mp[c] = std::exp(I.lnPhi[c]);
+                        const auto& G = F.gradK.empty() ? F.gradK0 : F.gradK;
+                        if (c < G.size()) sk[c] = G[c];
+                    }
+                    if (I.lnK.empty()) mk.clear();
+                    if (I.lnPhi.empty()) mp.clear();
+                    if (F.gradK.empty() && F.gradK0.empty()) sk.clear();
+                    const bool wantPhi = q == 1 || q >= 4, wantSens = q >= 2;
+                    study_.deferred = [this, mk, mp, sk, wantPhi, wantSens]() {
+                        hmMultK_ = mk; hmMultPhi_ = mp; hmSensK_ = sk; ++hmViewVer_;
+                        const char* want = wantSens ? "HMSENSK" : wantPhi ? "HMMULTPHI" : "HMMULTK";
+                        { const int pi = propIndexByName(want); if (pi >= 0) prop_ = pi; }
+                        autoRange_ = true;
+                        workspace_ = Workspace::Model;
+                        notify("Adjoint HM map shown in the Model 3D viewer (property HMMULTK / HMMULTPHI / HMSENSK)");
+                    };
+                }
+                if (ImGui::Button(ICON_CHECK " Apply the matched field to the case")) {
+                    const Case best = F.best;
+                    study_.deferred = [this, best]() {
+                        case_.grid.permx = best.grid.permx; case_.grid.permy = best.grid.permy;
+                        case_.grid.permz = best.grid.permz; case_.grid.poro = best.grid.poro;
+                        markDirty(true);
+                        notify("Matched per-cell permeability / porosity applied to the case - re-run the simulation (F5)");
+                    };
+                }
+                ImGui::EndGroup();
+            }
+        }
+        ImGui::EndTabItem();
+    }
+
+    // ------------------------------------------------------------------ responses of the best case
+    if (ui::tabItem(ICON_TARGET " Responses")) {
+        const auto& O = case_.observations;
+        const auto groups = obsGroups(case_);
+        if (O.empty() || groups.empty()) ui::hint("No observed data in the case.");
+        else {
+            std::vector<const RunResult*> runs = {r0, rk, rb};
+            std::vector<std::string> names = {"Prior", "Iteration " + std::to_string(K), "Best"};
+            // normalised RMS per series (cached per selection)
+            struct Cache { const void* a = nullptr; const void* b = nullptr; const void* c = nullptr; size_t nobs = 0; std::vector<std::vector<double>> rms; };
+            static Cache C;
+            if (C.a != r0 || C.b != rk || C.c != rb || C.nobs != O.size()) {
+                C = Cache(); C.a = r0; C.b = rk; C.c = rb; C.nobs = O.size();
+                const auto sig = autoSigma(O);
+                C.rms.assign(3, std::vector<double>(groups.size(), NAN));
+                for (size_t r = 0; r < 3; ++r) {
+                    if (!runs[r] || !runs[r]->ok) continue;
+                    const auto res = residuals(*runs[r], case_, O, sig);
+                    for (size_t g = 0; g < groups.size(); ++g) {
+                        double s = 0; int n = 0;
+                        for (int i : groups[g].idx) if (O[size_t(i)].weight > 0 && size_t(i) < res.size() && std::isfinite(res[size_t(i)])) { s += res[size_t(i)] * res[size_t(i)]; ++n; }
+                        if (n) C.rms[r][g] = std::sqrt(s / n);
+                    }
+                }
+            }
+            ImGui::Checkbox("All responses (grid)", &study_.adjAllResp);
+            ImGui::SameLine(); ImGui::TextDisabled("normalised RMS = sqrt(mean((sim - obs) / sigma)^2): < 1 within the measurement error");
+            if (!study_.adjAllResp) {
+                const float tw = std::min(fs * 30, ImGui::GetContentRegionAvail().x * 0.42f);
+                ImGui::BeginChild("##adjrl", ImVec2(tw, 0));
+                const ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+                if (ui::beginTable("##adjresp", 4, tf, ImVec2(0, -FLT_MIN))) {
+                    ImGui::TableSetupScrollFreeze(1, 1);
+                    ui::tableColumn("Response"); ui::tableColumn("Prior"); ui::tableColumn("Iter"); ui::tableColumn("Best");
+                    ImGui::TableHeadersRow();
+                    for (size_t g = 0; g < groups.size(); ++g) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        if (ImGui::Selectable((groupName(groups[g]) + "##rg" + std::to_string(g)).c_str(), study_.adjResp == int(g), ImGuiSelectableFlags_SpanAllColumns)) study_.adjResp = int(g);
+                        for (int r = 0; r < 3; ++r) {
+                            ImGui::TableNextColumn();
+                            const double v = C.rms[size_t(r)][g];
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, misfitColour(v));
+                            if (std::isfinite(v)) ImGui::Text("%.3g", v); else ImGui::TextDisabled("-");
+                        }
+                    }
+                    ui::endTable();
+                }
+                ImGui::EndChild();
+                ImGui::SameLine();
+                ImGui::BeginChild("##adjrp");
+                study_.adjResp = std::clamp(study_.adjResp, 0, int(groups.size()) - 1);
+                std::vector<const RunResult*> pr; std::vector<const char*> lab;
+                for (size_t r = 0; r < 3; ++r) if (runs[r] && runs[r]->ok) { pr.push_back(runs[r]); lab.push_back(names[r].c_str()); }
+                char id[160]; std::snprintf(id, sizeof id, "%s##adjfit", groupName(groups[size_t(study_.adjResp)]).c_str());
+                plotObservationFit(id, case_, pr, lab, study_.adjResp, std::max(fs * 12, ImGui::GetContentRegionAvail().y - 4));
+                ImGui::EndChild();
+            } else {
+                const int ng = int(groups.size());
+                const int cols = std::max(1, std::min(4, int(ImGui::GetContentRegionAvail().x / (fs * 22))));
+                ImGui::BeginChild("##adjgrid");
+                if (ImGui::BeginTable("##adjg", cols, ImGuiTableFlags_SizingStretchSame)) {
+                    std::vector<const RunResult*> pr; std::vector<const char*> lab;
+                    for (size_t r = 0; r < 3; ++r) if (runs[r] && runs[r]->ok) { pr.push_back(runs[r]); lab.push_back(names[r].c_str()); }
+                    for (int g = 0; g < ng; ++g) {
+                        ImGui::TableNextColumn();
+                        char id[160]; std::snprintf(id, sizeof id, "%s  (RMS %.2g -> %.2g)##adjg%d", groupName(groups[size_t(g)]).c_str(), C.rms[0][size_t(g)], C.rms[2][size_t(g)], g);
+                        plotObservationFit(id, case_, pr, lab, g, fs * 13);
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::EndChild();
+            }
+        }
+        ImGui::EndTabItem();
+    }
+
+    // ------------------------------------------------------------------ sensitivity
+    if (ui::tabItem(ICON_CHART_COLUMN " Sensitivity")) {
+        if (!field) {
+            const auto& P = study_.hmParams;
+            std::vector<std::string> names; std::vector<double> g0, gk;
+            for (size_t i = 0; i < P.size(); ++i) {
+                if (!P[i].active) continue;
+                names.push_back(paramLabel(P[i], case_));
+                const auto& a = H.history.empty() ? std::vector<double>() : H.history[0].grad;
+                const auto& b = K < int(H.history.size()) ? H.history[size_t(K)].grad : std::vector<double>();
+                g0.push_back(i < a.size() && std::isfinite(a[i]) ? a[i] : 0.0);
+                gk.push_back(i < b.size() && std::isfinite(b[i]) ? b[i] : 0.0);
+            }
+            ui::hint("Adjoint gradient of the misfit with respect to the normalised parameters u in [0, 1]: large bars = the data\n"
+                     "constrain the parameter strongly; the sign gives the direction that INCREASES the misfit.");
+            if (!names.empty() && ImPlot::BeginPlot("##adjsens", ImVec2(-1, -1))) {
+                std::vector<const char*> lab; for (auto& n : names) lab.push_back(n.c_str());
+                std::vector<double> pos(names.size()); for (size_t i = 0; i < pos.size(); ++i) pos[i] = double(i);
+                ImPlot::SetupAxes(nullptr, "d misfit / du", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                ImPlot::SetupAxisTicks(ImAxis_X1, pos.data(), int(pos.size()), lab.data());
+                ImPlotSpec s0; s0.FillColor = ImVec4(0.6f, 0.6f, 0.65f, 1);
+                ImPlot::PlotBars("prior (iteration 0)", g0.data(), int(g0.size()), 0.35, -0.19, s0);
+                ImPlotSpec sk; sk.FillColor = col4(Pal::Accent);
+                char l[48]; std::snprintf(l, sizeof l, "iteration %d", K);
+                ImPlot::PlotBars(l, gk.data(), int(gk.size()), 0.35, 0.19, sk);
+                ImPlot::EndPlot();
+            }
+        } else {
+            ui::hint("Per-cell sensitivity maps are in 'Field maps' (Map: d misfit / d ln k, prior or final).\n"
+                     "Below: the layer-wise sum of |d misfit / d ln k| - where in the reservoir the data are informative.");
+            const int nz = std::max(1, F.nz), nxy = std::max(1, F.nx * F.ny);
+            std::vector<double> s0(static_cast<size_t>(nz), 0.0), s1(static_cast<size_t>(nz), 0.0), kk(static_cast<size_t>(nz), 0.0);
+            for (int k = 0; k < nz; ++k) {
+                kk[size_t(k)] = k + 1;
+                for (int c = 0; c < nxy; ++c) {
+                    const size_t q = size_t(c) + size_t(nxy) * size_t(k);
+                    if (q < F.gradK0.size() && std::isfinite(F.gradK0[q])) s0[size_t(k)] += std::fabs(F.gradK0[q]);
+                    if (q < F.gradK.size() && std::isfinite(F.gradK[q])) s1[size_t(k)] += std::fabs(F.gradK[q]);
+                }
+            }
+            if (ImPlot::BeginPlot("##adjlay", ImVec2(-1, -1))) {
+                ImPlot::SetupAxes("sum |d misfit / d ln k|", "layer", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_Invert);
+                ImPlotSpec a; a.LineColor = ImVec4(0.6f, 0.6f, 0.65f, 1); a.LineWeight = 2; a.Marker = ImPlotMarker_Circle; a.MarkerSize = 3;
+                ImPlot::PlotLine("prior", s0.data(), kk.data(), nz, a);
+                ImPlotSpec b; b.LineColor = col4(Pal::Accent); b.LineWeight = 2.5f; b.Marker = ImPlotMarker_Circle; b.MarkerSize = 3;
+                ImPlot::PlotLine("final", s1.data(), kk.data(), nz, b);
+                ImPlot::EndPlot();
+            }
+        }
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+}
+
+// ============================================================================ C27 inversion statistics (iTOUGH2-style)
+// Linearised a-posteriori analysis of the history-match result: parameter standard deviations / 95 % confidence
+// intervals, correlation matrix, eigen-analysis, composite scaled sensitivities, residual analysis (studentized
+// residuals, outliers, objective share per data set). Called with study_.m held (hmParameters view).
+void App::hmStatsPanel() {
+    const float fs = ImGui::GetFontSize();
+    if (!ImGui::CollapsingHeader("Inversion statistics (iTOUGH2-style linear uncertainty analysis)")) return;
+    const auto& H = study_.hm; const auto& P = study_.hmParams;
+    int act = 0; for (auto& p : P) if (p.active) ++act;
+    ImGui::BeginDisabled(study_.running || !H.ok || H.best.size() != P.size());
+    char b[200];
+    std::snprintf(b, sizeof b, ICON_PLAY " Compute at the matched values  (%d runs)", act + 1);
+    if (ui::accentButton(b)) {
+        const Case base = case_; const auto hp = P; const auto v = H.best; HMStatsOptions o; o.fdStep = study_.statsFd;
+        o.eco = study_.eco; o.predict.clear();
+        for (int r = 0; r <= int(Response::MaxFailure); ++r) if ((study_.statsPredMask >> r) & 1u) o.predict.push_back(Response(r));
+        study_.deferred = [this, base, hp, v, o] {
+            startStudy("Inversion statistics", [base, hp, v, o](StudyState& S, const StudyCallbacks& cb) {
+                HMStatistics st = hmStatistics(base, hp, v, o, cb);
+                std::lock_guard<std::mutex> l(S.m); S.hmStats = std::move(st); S.hasStats = true;
+            });
+        };
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine(); ImGui::SetNextItemWidth(fs * 6);
+    ImGui::SliderFloat("FD step (fraction of range)", &study_.statsFd, 0.005f, 0.1f, "%.3f");
+    // C28 FOSM predictions (evaluated on the same runs: no extra simulations)
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("FOSM predictions:");
+    for (int r = 0; r <= int(Response::MaxFailure); ++r) {
+        if (Response(r) == Response::Misfit) continue;
+        bool on = (study_.statsPredMask >> r) & 1u;
+        ImGui::SameLine();
+        if (ImGui::Checkbox(toString(Response(r)), &on)) study_.statsPredMask = on ? (study_.statsPredMask | (1u << r)) : (study_.statsPredMask & ~(1u << r));
+    }
+    if (!study_.hasStats) {
+        ui::hint("C_pp = s0^2 (J^T J)^-1 with J the sensitivities of the weighted residuals (sim - obs) / sigma in the search space "
+                 "(log10 for log parameters) and s0^2 = SSR / (m - n). Shows how well the data determine each parameter, which "
+                 "parameters trade off (correlation), and which observations dominate or look like outliers.");
+        return;
+    }
+    const HMStatistics& S = study_.hmStats;
+    if (!S.ok) { ImGui::TextColored(col4(Pal::Err), "%s", S.error.c_str()); return; }
+    ImGui::Text("%d observations, %d parameters, objective %.5g, s0^2 = %.4g, condition number of J^T J = %.3g", S.nObs, S.nPar, S.objective, S.s02, S.condition);
+    if (S.condition > 1e8) ImGui::TextColored(col4(Pal::Warn), "Nearly singular: at least one parameter combination is not determined by the data (see the eigenvectors).");
+    auto fmtv = [](double v) { char t[48]; if (!std::isfinite(v)) std::snprintf(t, sizeof t, "inf"); else std::snprintf(t, sizeof t, "%.4g", v); return std::string(t); };
+    // ---- parameters
+    double cssMax = 0; for (double c : S.css) cssMax = std::max(cssMax, c);
+    if (ui::beginTable("hmst", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ui::tableColumn("Parameter", 0, 2.2f); ui::tableColumn("Value", 0, 0.9f); ui::tableColumn("Std. dev. (search coord.)", 0, 1.3f);
+        ui::tableColumn("95 % interval", 0, 1.6f); ui::tableColumn("Composite scaled sensitivity", 0, 1.6f); ui::tableColumn("Determined?", 0, 1.0f);
+        ImGui::TableHeadersRow();
+        for (int k = 0; k < S.nPar; ++k) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(S.name[size_t(k)].c_str());
+            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(fmtv(S.value[size_t(k)]).c_str());
+            ImGui::TableSetColumnIndex(2); ImGui::Text("%s%s", fmtv(S.stdDev[size_t(k)]).c_str(), S.logSpace[size_t(k)] ? " (log10)" : "");
+            ImGui::TableSetColumnIndex(3); ImGui::Text("%s .. %s", fmtv(S.ci95lo[size_t(k)]).c_str(), fmtv(S.ci95hi[size_t(k)]).c_str());
+            ImGui::TableSetColumnIndex(4);
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 a = ImGui::GetCursorScreenPos(); const float w = ImGui::GetContentRegionAvail().x * 0.6f, h = fs * 0.8f;
+                const float f = cssMax > 0 ? float(S.css[size_t(k)] / cssMax) : 0.f;
+                dl->AddRectFilled(ImVec2(a.x, a.y + 2), ImVec2(a.x + w * f, a.y + 2 + h), Pal::Accent, 2);
+                ImGui::Dummy(ImVec2(w, h + 2)); ImGui::SameLine(); ImGui::TextUnformatted(fmtv(S.css[size_t(k)]).c_str());
+            }
+            ImGui::TableSetColumnIndex(5);
+            // iTOUGH2 / Hill rule of thumb: CSS < 1 % of the largest -> not estimable; sigma (log10) > 0.5 -> poorly determined
+            const bool weak = cssMax > 0 && S.css[size_t(k)] < 0.01 * cssMax;
+            const bool poor = !std::isfinite(S.stdDev[size_t(k)]) || (S.logSpace[size_t(k)] ? S.stdDev[size_t(k)] > 0.5 : (S.value[size_t(k)] != 0 && S.stdDev[size_t(k)] > 0.5 * std::fabs(S.value[size_t(k)])));
+            if (weak) ImGui::TextColored(col4(Pal::Err), "insensitive");
+            else if (poor) ImGui::TextColored(col4(Pal::Warn), "poorly");
+            else ImGui::TextColored(col4(Pal::Ok), "well");
+        }
+        ui::endTable();
+    }
+    // ---- correlation matrix (colour = |r|) + eigen-analysis
+    if (S.nPar > 1 && ImGui::TreeNodeEx("Correlation matrix and eigen-analysis", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ui::beginTable("hmcorr", S.nPar + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+            ui::tableColumn("", 0, 0);
+            for (int k = 0; k < S.nPar; ++k) { std::snprintf(b, sizeof b, "p%d", k + 1); ui::tableColumn(b, 0, 0); }
+            ImGui::TableHeadersRow();
+            for (int a = 0; a < S.nPar; ++a) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("p%d %s", a + 1, S.name[size_t(a)].substr(0, 22).c_str());
+                for (int c = 0; c < S.nPar; ++c) {
+                    ImGui::TableSetColumnIndex(c + 1);
+                    const double r = S.corr[size_t(a)][size_t(c)];
+                    const float t = float(std::min(1.0, std::fabs(r)));
+                    const ImU32 bg = r >= 0 ? IM_COL32(220, 60, 60, int(40 + 160 * t)) : IM_COL32(60, 110, 230, int(40 + 160 * t));
+                    if (a != c) ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, bg);
+                    ImGui::Text("%+.2f", r);
+                }
+            }
+            ui::endTable();
+        }
+        ImGui::TextDisabled("|r| > 0.9: the two parameters trade off - the data constrain only a combination of them.");
+        for (size_t k = 0; k < S.eigVal.size() && k < 3; ++k) {
+            std::string v;
+            for (int a = 0; a < S.nPar; ++a) { std::snprintf(b, sizeof b, "%s%+.2f p%d", a ? "  " : "", S.eigVec[k][size_t(a)], a + 1); v += b; }
+            ImGui::Text("eigenvalue %s (std %s):  %s", fmtv(S.eigVal[k]).c_str(), fmtv(std::sqrt(S.eigVal[k])).c_str(), v.c_str());
+        }
+        ImGui::TextDisabled("largest covariance eigenvalues first = least determined parameter combinations");
+        ImGui::TreePop();
+    }
+    // ---- residual analysis
+    if (ImGui::TreeNodeEx("Residual analysis", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("weighted residuals: mean %.3g, std %.3g, skewness %.3g, excess kurtosis %.3g;  %zu potential outliers (|studentized| > 1.96)",
+                    S.resMean, S.resStd, S.resSkew, S.resKurt, S.outliers.size());
+        if (std::fabs(S.resMean) > 0.5 * std::max(S.resStd, 1e-12)) ImGui::TextColored(col4(Pal::Warn), "The residuals are biased: a systematic model error (missing physics / wrong fixed parameter) is likely.");
+        if (ui::beginTable("hmcof", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+            ui::tableColumn("Data set", 0, 2.0f); ui::tableColumn("Share of the objective", 0, 2.0f);
+            ImGui::TableHeadersRow();
+            for (const auto& c : S.contribution) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(c.first.c_str());
+                ImGui::TableSetColumnIndex(1); ImGui::ProgressBar(float(c.second / 100.0), ImVec2(-1, fs * 0.9f), (fmtv(c.second) + " %").c_str());
+            }
+            ui::endTable();
+        }
+        if (!S.studentized.empty() && ImPlot::BeginPlot("Studentized residuals", ImVec2(-1, fs * 9))) {
+            ImPlot::SetupAxes("observation", "w_i", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+            std::vector<double> x(S.studentized.size()); for (size_t i = 0; i < x.size(); ++i) x[i] = double(i + 1);
+            ImPlotSpec s; s.Marker = ImPlotMarker_Circle; s.MarkerSize = 3; s.LineWeight = 0; s.MarkerFillColor = col4(Pal::Accent);
+            ImPlot::PlotScatter("w", x.data(), S.studentized.data(), int(x.size()), s);
+            const double lim[2] = {-1.96, 1.96};
+            ImPlotSpec sl; sl.LineColor = col4(Pal::Warn); sl.LineWeight = 1.5f; sl.Flags = ImPlotInfLinesFlags_Horizontal;
+            ImPlot::PlotInfLines("+-1.96", lim, 2, sl);
+            ImPlot::EndPlot();
+        }
+        ImGui::TreePop();
+    }
+    // ---- C28 FOSM prediction uncertainty + data worth
+    if (!S.pred.empty() && ImGui::TreeNodeEx("Prediction uncertainty (FOSM) and data worth", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ui::beginTable("hmpred", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+            ui::tableColumn("Prediction", 0, 1.2f); ui::tableColumn("Value +- 1 sd", 0, 1.6f); ui::tableColumn("95 % interval (linearised)", 0, 2.0f);
+            ImGui::TableHeadersRow();
+            for (const auto& p : S.pred) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(p.name.c_str());
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%s +- %s", fmtv(p.value).c_str(), fmtv(p.stdDev).c_str());
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%s .. %s", fmtv(p.lo).c_str(), fmtv(p.hi).c_str());
+            }
+            ui::endTable();
+        }
+        if (!S.worth.empty() && ui::beginTable("hmworth", 3 + int(S.pred.size()), ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY, ImVec2(0, fs * 14))) {
+            ui::tableColumn("Data set", 0, 1.6f); ui::tableColumn("Kind", 0, 1.3f); ui::tableColumn("Points", 0, 0.6f);
+            for (const auto& p : S.pred) ui::tableColumn(("d sd " + p.name + " [%]").c_str(), 0, 1.0f);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+            for (const auto& w : S.worth) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(w.set.c_str());
+                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(w.existing ? "observed (remove)" : "candidate (add)");
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%d", w.points);
+                for (size_t j = 0; j < w.dStdPct.size(); ++j) {
+                    ImGui::TableSetColumnIndex(3 + int(j));
+                    const double d = w.dStdPct[j];
+                    const bool big = std::isfinite(d) && std::fabs(d) > 10;
+                    if (big) ImGui::TextColored(col4(w.existing ? Pal::Warn : Pal::Ok), "%+.1f", d); else ImGui::TextUnformatted(std::isfinite(d) ? fmtv(d).c_str() : "unbounded");
+                }
+            }
+            ui::endTable();
+        }
+        ui::hint("sigma_z^2 = g^T C_pp g with g = dz/dx from the Jacobian runs. Observed sets: how much the prediction uncertainty would grow "
+                 "without that data (its worth). Candidate sets: expected reduction if that vector were measured at the observation times "
+                 "with the automatic error (5 % of the value, >= 3 % of the series maximum). Linear analysis - valid near the match.");
+        ImGui::TreePop();
     }
 }

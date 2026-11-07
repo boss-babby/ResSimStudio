@@ -1,0 +1,43 @@
+CASE N
+GRID case N best 0.71624115 at (1.0, 1.0, 1.0, 1.0) (231 feasible grid points)
+ SCP start primary
+  start u [1.75, 1.75, 0.25, 0.25] N 1.5232905 (replicated Dieterich 1.5232906)
+  iter 1 Delta 0.500 model 1.52329 -> 0.767036 | true 1.5232905 -> 0.77027365 | rho 0.996 accept | u [1.25, 1.25, 0.75, 0.75]
+  iter 2 Delta 0.750 model 0.770274 -> 0.70711 | true 0.77027365 -> 0.70744725 | rho 0.995 accept | u [1.111, 0.991, 0.88, 1.018]
+  iter 3 Delta 0.750 model 0.707447 -> 0.707291 | true 0.70744725 -> 0.70728701 | rho 1.028 accept | u [1.119, 0.995, 0.887, 0.999]
+  iter 4 Delta 0.750 model 0.707287 -> 0.707286 | true 0.70728701 -> 0.70728768 | rho -0.574 reject | u [1.118, 0.995, 0.886, 1.001]
+  iter 5 Delta 0.375 model 0.707287 -> 0.707286 | true 0.70728701 -> 0.70728767 | rho -0.568 reject | u [1.118, 0.995, 0.886, 1.001]
+  iter 6 Delta 0.188 model 0.707287 -> 0.707286 | true 0.70728701 -> 0.70728768 | rho -0.574 reject | u [1.118, 0.995, 0.886, 1.001]
+ RESULT case N start primary N 0.70728701 gap to grid -1.250 % | first <= 1 %: (2, 11) | runs 31
+ SCP start constant
+  start u [1.0, 1.0, 1.0, 1.0] N 0.71624115 (replicated Dieterich 0.71624121)
+  iter 1 Delta 0.500 model 0.716241 -> 0.707343 | true 0.71624115 -> 0.70824445 | rho 0.899 accept | u [1.13, 0.988, 0.886, 0.996]
+  iter 2 Delta 0.750 model 0.708244 -> 0.708157 | true 0.70824445 -> 0.70729938 | rho 10.850 accept | u [1.116, 0.997, 0.886, 1.001]
+  iter 3 Delta 0.750 model 0.707299 -> 0.707297 | true 0.70729938 -> 0.70728689 | rho 5.247 accept | u [1.118, 0.995, 0.886, 1.001]
+  iter 4 Delta 0.750 model 0.707287 -> 0.707287 | true 0.70728689 -> 0.70728762 | rho -71.177 reject | u [1.118, 0.995, 0.886, 1.001]
+  iter 5 Delta 0.375 model 0.707287 -> 0.707287 | true 0.70728689 -> 0.70728771 | rho -79.982 reject | u [1.118, 0.995, 0.886, 1.001]
+  iter 6 Delta 0.188 model 0.707287 -> 0.707287 | true 0.70728689 -> 0.70728759 | rho -68.981 reject | u [1.118, 0.995, 0.886, 1.001]
+ RESULT case N start constant N 0.70728689 gap to grid -1.250 % | first <= 1 %: (0, 1) | runs 31
+VERDICT case N SUPPORTED
+CASE F
+GRID case F best 0.22273918 at (1.0, 1.0, 0.75, 1.25) (231 feasible grid points)
+ SCP start primary
+  start u [1.75, 1.75, 0.25, 0.25] N 0.26230813 (replicated Dieterich 0.26230813)
+  iter 1 Delta 0.500 model 0.262308 -> 0.227293 | true 0.26230813 -> 0.22805309 | rho 0.978 accept | u [1.25, 1.25, 0.75, 0.75]
+  iter 2 Delta 0.750 model 0.228053 -> 0.22206 | true 0.22805309 -> 0.22271645 | rho 0.891 accept | u [0.964, 0.94, 0.848, 1.248]
+  iter 3 Delta 0.750 model 0.222716 -> 0.222548 | true 0.22271645 -> 0.22257438 | rho 0.845 accept | u [1.049, 0.918, 0.872, 1.161]
+  iter 4 Delta 0.750 model 0.222574 -> 0.222551 | true 0.22257438 -> 0.22254082 | rho 1.463 accept | u [1.01, 0.943, 0.87, 1.177]
+  iter 5 Delta 0.750 model 0.222541 -> 0.22254 | true 0.22254082 -> 0.22253813 | rho 6.369 accept | u [1.006, 0.947, 0.873, 1.174]
+  iter 6 Delta 0.750 model 0.222538 -> 0.222538 | true 0.22253813 -> 0.22253784 | rho 39.688 accept | u [1.005, 0.947, 0.873, 1.175]
+ RESULT case F start primary N 0.22253784 gap to grid -0.090 % | first <= 1 %: (2, 11) | runs 31
+ SCP start constant
+  start u [1.0, 1.0, 1.0, 1.0] N 0.2231553 (replicated Dieterich 0.22315534)
+  iter 1 Delta 0.500 model 0.223155 -> 0.222461 | true 0.2231553 -> 0.22254064 | rho 0.885 accept | u [0.995, 0.943, 0.865, 1.197]
+  iter 2 Delta 0.750 model 0.222541 -> 0.22253 | true 0.22254064 -> 0.22253831 | rho 0.209 accept | u [1.005, 0.948, 0.875, 1.172]
+  iter 3 Delta 0.375 model 0.222538 -> 0.222538 | true 0.22253831 -> 0.22253774 | rho 2.340 accept | u [1.005, 0.947, 0.873, 1.175]
+  iter 4 Delta 0.750 model 0.222538 -> 0.222538 | true 0.22253774 -> 0.22253781 | rho -10.155 reject | u [1.005, 0.947, 0.873, 1.175]
+  iter 5 Delta 0.375 model 0.222538 -> 0.222538 | true 0.22253774 -> 0.2225378 | rho -9.092 reject | u [1.005, 0.947, 0.873, 1.175]
+  iter 6 Delta 0.188 model 0.222538 -> 0.222538 | true 0.22253774 -> 0.22253783 | rho -12.295 reject | u [1.005, 0.947, 0.873, 1.175]
+ RESULT case F start constant N 0.22253774 gap to grid -0.090 % | first <= 1 %: (0, 1) | runs 31
+VERDICT case F SUPPORTED
+H10BDONE total runs 586

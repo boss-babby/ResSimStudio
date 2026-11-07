@@ -1,6 +1,11 @@
 // App: frame orchestration, docking layout, menus, toolbar, status bar, case explorer,
 // inspector dispatch, log, file actions, run control and initialisation preview.
 #include "app.h"
+#include "i18n.h"
+#include "nav.h"
+#include <filesystem>
+#include "plotkit.h"
+#include "ressim/therm_deck.h"
 #include "icons.h"
 #include "widgets.h"
 #include "theme.h"
@@ -10,8 +15,8 @@
 #include "ressim/io.h"
 #include "ressim/simulator.h"
 #include "ressim/examples.h"
-#include <windows.h>
-#include <commdlg.h>
+#include "ressim/comp_deck.h"
+#include "platform.h"
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -23,7 +28,7 @@
 
 using namespace ressim;
 
-static const char* kSectionNames[] = {"Run specification", "Grid & rock", "Fluid PVT", "Rel. perm & Pc", "Initialization", "Aquifers", "EOR (polymer)", "Wells", "Schedule", "Numerics", "Advanced keywords"};
+static const char* kSectionNames[] = {TRN("Run specification"), TRN("Grid & rock"), TRN("Fluid (PVT / EOS / CO2)"), TRN("Rel. perm & Pc"), TRN("Initialization"), TRN("Aquifers"), TRN("EOR (polymer)"), TRN("Wells"), TRN("Schedule"), TRN("Numerics"), TRN("Advanced keywords")};
 static const char* kSectionIcons[] = {ICON_SETTINGS, ICON_GRID_3X3, ICON_DROPLET, ICON_CHART_SPLINE, ICON_ARROW_DOWN_TO_LINE, ICON_WAVES, ICON_FLASK_CONICAL, ICON_CIRCLE_DOT, ICON_HISTORY, ICON_CPU, ICON_LIST};
 static const char* kSectionHelp[] = {
     "Title, unit system and active phases (black-oil formulation).",
@@ -66,55 +71,32 @@ std::string safeFileName(const std::string& name) {
     return r.empty() ? std::string("untitled") : r;
 }
 
-// Common open/save dialog. `path` may be a bare file name, a full path, or empty. Only the file-name part is
-// sanitised (a drive letter's ':' stays). If the dialog refuses the initial name (GetSaveFileName fails silently
-// with an invalid lpstrFile) it is reopened without one.
-bool fileDialog(bool save, const char* filter, const char* defExt, std::string& path) {
-    std::string dir, name = path;
-    const size_t slash = path.find_last_of("\\/");
-    if (slash != std::string::npos) { dir = path.substr(0, slash); name = path.substr(slash + 1); }
-    if (!name.empty()) name = safeFileName(name);
-    if (!dir.empty()) {
-        const DWORD attr = GetFileAttributesA(dir.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) dir.clear();
-    }
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        std::vector<char> buf(32768, 0);
-        if (attempt == 0 && !name.empty() && name.size() < buf.size()) std::memcpy(buf.data(), name.data(), name.size());
-        OPENFILENAMEA ofn{};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = g_gfx.hwnd;
-        ofn.lpstrFilter = filter;
-        ofn.nFilterIndex = 1;
-        ofn.lpstrFile = buf.data();
-        ofn.nMaxFile = DWORD(buf.size());
-        ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
-        ofn.lpstrDefExt = defExt;
-        ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST |
-                    (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-        const BOOL ok = save ? GetSaveFileNameA(&ofn) : GetOpenFileNameA(&ofn);
-        if (ok) { path = buf.data(); return true; }
-        const DWORD err = CommDlgExtendedError();
-        if (err == 0) return false;                            // the user cancelled
-        if (attempt == 0) { dir.clear(); continue; }           // e.g. FNERR_INVALIDFILENAME (0x3002): retry with no name
-        char msg[160];
-        std::snprintf(msg, sizeof(msg), "The file dialog could not be opened (error 0x%04lX).", (unsigned long)err);
-        MessageBoxA(g_gfx.hwnd, msg, "ResSim Studio", MB_OK | MB_ICONWARNING);
-    }
-    return false;
-}
-
 // ============================================================================ lifecycle
 void App::init() {
     viewOk_ = view_.init();
     loadSettings();
+    applyHpcSettings();
+    loadCustomPlots();
     if (settings_.uiScale <= 0) {
         // first start: laptop screens (1366 / 1440 / 1536 logical px) get a compact interface
-        const float logical = float(GetSystemMetrics(SM_CXSCREEN)) / std::max(0.5f, g_gfx.dpiScale);
+        const float logical = float(plat::screenWidth() > 0 ? plat::screenWidth() : 1920) / std::max(0.5f, g_gfx.dpiScale);
         settings_.uiScale = logical < 1500 ? 0.85f : logical < 1800 ? 0.92f : 1.0f;
     }
     setUiScale(settings_.uiScale);
+    // C14: every plot can be exported on its own (right-click menu / corner button) through the figure export window
+    installPlotCapture([this](const fig::Figure& f) {
+        figx_.fig = f;
+        figx_.plotId = lastCapturedPlot();
+        figx_.snapWait = false;
+        figx_.id.clear();                 // captured single plot (not a recorded dashboard figure)
+        figx_.open = true;
+        figx_.cols = 0;
+        figDeferredFocus_ = true;
+    });
     newCase(0);
+    showStart_ = settings_.showStartPage;
+    applyColors(settings_.theme, settings_.accent);   // C39 colour theme
+    recoveryCheck();                                  // C39 autosave left by a crash?
     runner_.addLog("ResSim Studio started. " + std::to_string(std::max(1u, std::thread::hardware_concurrency())) + " hardware threads available.");
     if (!viewOk_) runner_.addLog("ERROR: 3D renderer failed to initialise.");
 }
@@ -128,13 +110,62 @@ void App::shutdown() {
     view_.shutdown();
     if (rv_.viewInit) rv_.view.shutdown();
     saveSettings();
+    if (nav::indexChanged()) nav::saveIndex(plat::configDir() + "/nav_index.txt");
+    recoveryClear();   // C39: closed normally (changes were saved or discarded in confirmClose)
 }
 
 bool App::wantsContinuousFrames() const {
-    return runner_.running() || study_.running || study_.manualPending || play_ || ImGui::GetTime() < toastUntil_;
+    return runner_.running() || study_.running || study_.manualPending || play_ || ImGui::GetTime() < toastUntil_ || nav::pending();
 }
 
 void App::frame() {
+    plotCaptureNewFrame();   // C22: hand over single-plot captures / exact snapshots of the previous frame
+    nav::beginFrame(int(workspace_), int(section_));   // C40 deep links + tab index
+    if (!smokeAction_.empty() && ++smokeFrame_ == 3) {   // C40 scripted smoke-test states
+        if (smokeAction_ == "wizard") showWizard_ = true;
+        else if (smokeAction_ == "palette") { paletteOpen_ = true; paletteFocus_ = true; }
+        else if (smokeAction_ == "run" || smokeAction_ == "results") runSimulation();
+        else if (smokeAction_ == "model") workspace_ = Workspace::Model;   // C45 (translated panels)
+        else if (smokeAction_ == "cases" || smokeAction_ == "filter") {   // C40: case manager with 3 variants / Inspector filter
+            if (smokeAction_ == "cases") {
+                casesAdd("Base case", case_);
+                Case v = case_; for (auto& x : v.grid.permx) x *= 2.0; v.title += " (k x2)"; casesAdd("High permeability", v);
+                variants_.back().note = "PERMX doubled";
+                Case w = case_; w.equil.owc += 30; casesAdd("Deeper OWC", w);
+                casesSel_ = 1; showCases_ = true;
+            } else { section_ = Section::Grid; inspFilter_ = "perm"; }
+        }
+    }
+    if (smokeAction_ == "results" && smokeFrame_ > 3 && !runner_.running()) workspace_ = Workspace::Results;   // C45
+    if ((smokeAction_ == "run" || smokeAction_ == "results") && smokeFrame_ > 3 && smokeFrame_ % 20 == 0 && !runner_.running()) {   // finished: report step to mid-run
+        std::lock_guard<std::mutex> l(runner_.mutex());
+        const int n = int(runner_.results().snaps.size());
+        if (runner_.results().valid && n >= 2) snap_ = n / 2;
+    }
+    {   // C40 linked time cursor: the current report time on every time plot
+        double t = NAN, epoch = 0;
+        if (settings_.timeCursor && !runner_.running()) {
+            std::lock_guard<std::mutex> l(runner_.mutex());
+            const RunResults& R = runner_.results();
+            if (R.valid && R.snaps.size() >= 2) {
+                t = R.snaps[size_t(std::clamp(snap_, 0, int(R.snaps.size()) - 1))].time;
+                // days from 1970-01-01 to START (civil-from-days inverse, proleptic Gregorian)
+                int y = R.input.startYear, m = R.input.startMonth, d = R.input.startDay;
+                y -= m <= 2;
+                const int era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400;
+                const int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+                epoch = (double(era) * 146097.0 + doe - 719468.0) * 86400.0;
+            }
+        }
+        timeCursorSet(t, epoch, settings_.timeCursor);
+    }
+    {
+        static bool navLoaded = false;
+        static double navSaveAt = 0;
+        const std::string navFile = plat::configDir() + "/nav_index.txt";
+        if (!navLoaded) { navLoaded = true; nav::loadIndex(navFile); }
+        if (nav::indexChanged() && ImGui::GetTime() > navSaveAt) { nav::saveIndex(navFile); navSaveAt = ImGui::GetTime() + 5.0; }
+    }
     if (gridDirty_) rebuildPreview();
 
     // run completion
@@ -150,11 +181,15 @@ void App::frame() {
             snap_ = std::max(0, int(R.snaps.size()) - 1);
             if (R.engine != "ResSim") { opmDeck = R.opmDeck; opmOk = R.valid; extName = R.engine; }
         }
-        if (err.empty()) notify(opmDeck.empty() ? std::string("Simulation finished") : extName + " run finished");
+        if (err.empty() && opmDeck.empty()) { afterRunOutputs(); if (settings_.runHistory) rvAddRunHistory(); }
+        if (err.empty()) notify(opmDeck.empty() ? std::string(TR("Simulation finished")) : extName + TR(" run finished"));
         else notify("Run stopped: " + err);
-        if (opmOk && settings_.opmAutoView && !opmDeck.empty()) rvOpen(opmDeck, true);
+        // decks ResSim cannot represent: their 3-D results only map onto the engine's own grid, so always open them
+        // in the result viewer (the Model grid holds placeholders)
+        if (opmOk && !opmDeck.empty() && (settings_.opmAutoView || !case_.engineUnsupported.empty())) rvOpen(opmDeck, true);
     }
     wasRunning_ = running;
+    pollPostGeo();   // C30 post-processed geomechanics finished?
 
     // global shortcuts (the Deck Editor handles its own file shortcuts and F5)
     const ImGuiInputFlags G = ImGuiInputFlags_RouteGlobal;
@@ -162,9 +197,12 @@ void App::frame() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_2, G)) workspace_ = Workspace::DeckEditor;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_3, G)) workspace_ = Workspace::Results;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_4, G)) workspace_ = Workspace::Studies;
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_5, G)) workspace_ = Workspace::Geomodel;
+    if (geoMode_) workspace_ = Workspace::Geomodel;   // ResGeo: the geomodelling front end only
     if (ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_F5, G)) runner_.cancel();
     if (workspace_ != Workspace::DeckEditor) {
         if (ImGui::Shortcut(ImGuiKey_F5, G)) runSimulation();
+        if (ImGui::Shortcut(ImGuiKey_F1, G)) openUserGuide();
         {   // interface size: Ctrl + / Ctrl - / Ctrl 0
             float k = settings_.uiScale;
             if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Equal, G) || ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_KeypadAdd, G)) k += 0.05f;
@@ -174,6 +212,12 @@ void App::frame() {
             if (std::fabs(k - settings_.uiScale) > 1e-4f) { settings_.uiScale = k; setUiScale(k); saveSettings(); }
         }
         if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, G)) save(false);
+        // C39 undo / redo of model edits (text fields keep their own Ctrl+Z while typing; the Geomodel has its own history)
+        if (workspace_ != Workspace::Geomodel && !ImGui::GetIO().WantTextInput) {
+            if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, G | ImGuiInputFlags_Repeat)) undoApply(-1);
+            if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, G | ImGuiInputFlags_Repeat) ||
+                ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, G | ImGuiInputFlags_Repeat)) undoApply(+1);
+        }
         if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S, G)) save(true);
         if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_O, G)) openDialog();
         if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_N, G)) { if (maybeSaveChanges()) newCase(2); }
@@ -182,6 +226,11 @@ void App::frame() {
     menuBar();
     toolbar();
     statusBar();
+    commandPalette();   // C26: Ctrl+Shift+P / Ctrl+K
+    wfTick();           // C41 workflow replay (one step per frame)
+    if (showWorkflow_) panelWorkflow();
+    if (showCases_) panelCases();   // C40 (G10)
+    startPage();
     if (workspace_ == Workspace::Model) {
         dockSpace();
         panelCase();
@@ -198,13 +247,34 @@ void App::frame() {
         ImGui::DockSpace(ImGui::GetID("MainDock"), ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
         if (workspace_ == Workspace::DeckEditor) deckEditorWorkspace();
         else if (workspace_ == Workspace::Studies) studiesWorkspace();
+        else if (workspace_ == Workspace::Geomodel) geomodelWorkspace();
         else resultsWorkspace();
     }
     figureExportWindow();
     opmSettingsWindow();
+    restartWindow();
+    reportWindow();
+    regressionWindow();
+    stabilityWindow();
+    seismicityWindow();
+    efemWindow();
     if (rvDeferred_) { auto f = std::move(rvDeferred_); rvDeferred_ = nullptr; f(); }
     aboutWindow();
+    newModelWizard();   // C40
+    recoveryWindow();
     if (showImGuiDemo_) ImGui::ShowDemoWindow(&showImGuiDemo_);
+    undoTrack();      // C39: snapshot after a finished edit gesture
+    autosaveTick();   // C39: background recovery copy
+    {   // C40: the time cursor was dragged on a plot -> nearest report step for every view
+        double d = 0;
+        if (timeCursorDragged(&d)) {
+            std::lock_guard<std::mutex> l(runner_.mutex());
+            const RunResults& R = runner_.results();
+            int best = snap_; double bd = 1e300;
+            for (int k = 0; k < int(R.snaps.size()); ++k) { const double e = std::fabs(R.snaps[size_t(k)].time - d); if (e < bd) { bd = e; best = k; } }
+            snap_ = best; play_ = false;
+        }
+    }
 
     // toast notification (bottom-right, fades out)
     const double now = ImGui::GetTime();
@@ -217,16 +287,17 @@ void App::frame() {
         const ImVec2 p1(vp->WorkPos.x + vp->WorkSize.x - pad * 2, vp->WorkPos.y + vp->WorkSize.y - pad * 2);
         const ImVec2 p0(p1.x - ts.x - pad * 2 - 6, p1.y - ts.y - pad * 2);
         dl->AddRectFilled(ImVec2(p0.x + 3, p0.y + 4), ImVec2(p1.x + 3, p1.y + 4), IM_COL32(0, 0, 0, int(90 * alpha)), 8);
-        dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImVec4(0.13f, 0.14f, 0.17f, 0.97f * alpha)), 8);
+        { ImVec4 cb = themeCardBg(); cb.w *= alpha; dl->AddRectFilled(p0, p1, ImGui::GetColorU32(cb), 8); }
+        if (themeIsLight()) dl->AddRect(p0, p1, ImGui::GetColorU32(ImGuiCol_Border, alpha), 8);
         dl->AddRectFilled(p0, ImVec2(p0.x + 5, p1.y), (Pal::Accent & 0x00FFFFFF) | (ImU32(255 * alpha) << 24), 8, ImDrawFlags_RoundCornersLeft);
-        dl->AddText(ImVec2(p0.x + pad + 6, p0.y + pad), ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), toast_.c_str());
+        dl->AddText(ImVec2(p0.x + pad + 6, p0.y + pad), ImGui::GetColorU32(ImGuiCol_Text, alpha), toast_.c_str());
     }
 
     // window title
     std::string title = "ResSim Studio - " + (path_.empty() ? case_.title : baseName(path_)) + (dirty_ ? " *" : "");
     if (std::string(titleBuf_.begin(), titleBuf_.end()) != title) {
         titleBuf_.assign(title.begin(), title.end());
-        SetWindowTextA(g_gfx.hwnd, title.c_str());
+        plat::setWindowTitle(title);
     }
 }
 
@@ -257,95 +328,163 @@ void App::dockSpace() {
 
 void App::menuBar() {
     if (!ImGui::BeginMainMenuBar()) return;
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::BeginMenu(ICON_FILE_PLUS "  New")) {
-            if (ImGui::MenuItem("Demo: 3-phase waterflood (SPE1-like PVT)")) { if (maybeSaveChanges()) newCase(0); }
-            if (ImGui::MenuItem("Validation: 1D Buckley-Leverett")) { if (maybeSaveChanges()) newCase(1); }
-            if (ImGui::MenuItem("Blank model", "Ctrl+N")) { if (maybeSaveChanges()) newCase(2); }
+    if (ImGui::BeginMenu(TR("File"))) {
+        if (ImGui::BeginMenu(TR(ICON_FILE_PLUS "  New"))) {
+            if (ImGui::MenuItem(TR("Demo: 3-phase waterflood (SPE1-like PVT)"))) { if (maybeSaveChanges()) newCase(0); }
+            if (ImGui::MenuItem(TR("Validation: 1D Buckley-Leverett"))) { if (maybeSaveChanges()) newCase(1); }
+            if (ImGui::MenuItem(TR(ICON_WAND_SPARKLES "  Model wizard..."))) showWizard_ = true;   // C40
+            if (ImGui::MenuItem(TR("Blank model"), "Ctrl+N")) { if (maybeSaveChanges()) newCase(2); }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu(ICON_BOOK_OPEN "  Examples")) { examplesMenu(false); ImGui::EndMenu(); }
-        if (ImGui::MenuItem(ICON_FOLDER_OPEN "  Open...", "Ctrl+O")) openDialog();
+        if (ImGui::BeginMenu(TR(ICON_BOOK_OPEN "  Examples"))) { examplesMenu(false); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu(TR(ICON_BOOK_OPEN "  Example decks (examples, decks folders)"))) { deckFilesMenu(); ImGui::EndMenu(); }
+        if (ImGui::MenuItem(TR(ICON_FOLDER_OPEN "  Open..."), "Ctrl+O")) openDialog();
+        if (ImGui::BeginMenu(TR(ICON_HISTORY "  Recent"))) { recentMenu(); ImGui::EndMenu(); }
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_SAVE "  Save", "Ctrl+S")) save(false);
-        if (ImGui::MenuItem(ICON_SAVE "  Save As...", "Ctrl+Shift+S")) save(true);
-        if (ImGui::MenuItem(ICON_FILE_CODE "  Edit deck file in Deck Editor...")) {
+        if (ImGui::MenuItem(TR(ICON_SAVE "  Save"), "Ctrl+S")) save(false);
+        if (ImGui::MenuItem(TR(ICON_SAVE "  Save As..."), "Ctrl+Shift+S")) save(true);
+        if (ImGui::MenuItem(TR(ICON_FILE_CODE "  Edit deck file in Deck Editor..."))) {
             std::string p;
             if (fileDialog(false, "ECLIPSE deck / include (*.DATA;*.INC;*.GRDECL)\0*.DATA;*.data;*.INC;*.inc;*.GRDECL;*.grdecl;*.SCH;*.sch;*.PROP;*.prop\0All files (*.*)\0*.*\0", "DATA", p)) {
                 edOpenFile(p);
                 workspace_ = Workspace::DeckEditor;
             }
         }
-        if (ImGui::MenuItem("Open current model as deck text (Deck Editor)")) { edOpenModelDeck(); workspace_ = Workspace::DeckEditor; }
-        if (ImGui::MenuItem(ICON_UPLOAD "  Import ECLIPSE deck (.DATA)...")) {
+        if (ImGui::MenuItem(TR("Open current model as deck text (Deck Editor)"))) { edOpenModelDeck(); workspace_ = Workspace::DeckEditor; }
+        if (ImGui::MenuItem(TR(ICON_UPLOAD "  Import ECLIPSE deck (.DATA)..."))) {
             std::string p;
             if (maybeSaveChanges() && fileDialog(false, "ECLIPSE deck (*.DATA;*.data)\0*.DATA;*.data\0All files (*.*)\0*.*\0", "DATA", p)) { dirty_ = false; importDeck(p); }
         }
-        if (ImGui::MenuItem(ICON_DOWNLOAD "  Export ECLIPSE deck (.DATA)...")) exportDeck();
+        if (ImGui::MenuItem(TR(ICON_DOWNLOAD "  Export ECLIPSE deck (.DATA)..."))) exportDeck();
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_CHART_LINE "  Open results (ECLIPSE / OPM Flow)...")) {
+        if (ImGui::MenuItem(TR(ICON_FOLDER_OPEN "  Open ResSim results (.rsres)..."))) {
+            std::string p;
+            if (fileDialog(false, "ResSim results (*.rsres)\0*.rsres\0All files (*.*)\0*.*\0", "rsres", p)) openResultsFile(p);
+        }
+        {
+            bool has = false;
+            { std::lock_guard<std::mutex> l(runner_.mutex()); has = runner_.results().valid && !runner_.results().summary.empty(); }
+            if (ImGui::MenuItem(TR(ICON_SAVE "  Save results (.rsres)..."), nullptr, false, has && !runner_.running())) saveResultsDialog();
+            if (ImGui::MenuItem(TR(ICON_DOWNLOAD "  Export results as ECLIPSE files (EGRID / UNRST / UNSMRY)..."), nullptr, false, has && !runner_.running()))
+                exportResultsEclipseDialog();
+            if (ImGui::MenuItem(TR(ICON_FILE_TEXT "  Generate report (Word / PowerPoint / HTML)..."), nullptr, showReport_, has)) showReport_ = true;
+        }
+        if (ImGui::MenuItem(TR(ICON_CHART_LINE "  Open results (ECLIPSE / OPM Flow)..."))) {
             std::string p;
             if (fileDialog(false, "ECLIPSE / OPM Flow results\0*.SMSPEC;*.FSMSPEC;*.EGRID;*.FEGRID;*.UNRST;*.FUNRST;*.INIT;*.FINIT;*.UNSMRY;*.FUNSMRY;*.DATA;*.data\0All files (*.*)\0*.*\0", "SMSPEC", p))
                 rvOpen(p);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_LOG_OUT "  Exit", "Alt+F4")) quit_ = true;
+        if (ImGui::MenuItem(TR(ICON_LOG_OUT "  Exit"), "Alt+F4")) quit_ = true;
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Run")) {
-        if (ImGui::MenuItem(ICON_PLAY "  Run simulation", "F5", false, !runner_.running())) runSimulation();
-        if (ImGui::MenuItem(ICON_SQUARE "  Stop", "Shift+F5", false, runner_.running())) runner_.cancel();
+    if (ImGui::BeginMenu(TR("Edit"))) {   // C39
+        char u[64], r[64];
+        std::snprintf(u, sizeof(u), ICON_UNDO_2 "  Undo%s", canUndo() ? "" : " (nothing to undo)");
+        std::snprintf(r, sizeof(r), ICON_REDO_2 "  Redo%s", canRedo() ? "" : " (nothing to redo)");
+        if (ImGui::MenuItem(u, "Ctrl+Z", false, canUndo())) undoApply(-1);
+        if (ImGui::MenuItem(r, "Ctrl+Y", false, canRedo())) undoApply(+1);
         ImGui::Separator();
-        if (ImGui::MenuItem("Engine: ResSim (built-in)", nullptr, settings_.engine == 0)) { settings_.engine = 0; saveSettings(); }
-        if (ImGui::MenuItem("Engine: OPM Flow (external)", nullptr, settings_.engine == 1)) { settings_.engine = 1; saveSettings(); detectFlow(false); }
-        if (ImGui::MenuItem("Engine: ECLIPSE (external, licensed)", nullptr, settings_.engine == 2)) { settings_.engine = 2; saveSettings(); detectEclipse(false); }
-        if (ImGui::MenuItem(ICON_SETTINGS "  Simulation engine settings (OPM Flow / ECLIPSE)...")) showOpmSettings_ = true;
+        ImGui::TextDisabled("History: %d edit step(s) kept (up to %d for this model size)", std::max(0, int(undo_.stack.size()) - 1), int(undo_.maxLevels) - 1);
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_ARROW_DOWN_TO_LINE "  Compute initial state")) { computeInit(); section_ = Section::Init; }
-        if (ImGui::MenuItem(ICON_CHECK "  Validate inputs")) {
+        if (ImGui::MenuItem(TR(ICON_SEARCH "  Command palette"), "Ctrl+Shift+P")) { paletteOpen_ = true; paletteBuf_[0] = 0; paletteSel_ = 0; paletteFocus_ = true; }
+        if (ImGui::MenuItem(TR(ICON_SETTINGS "  Settings..."))) showOpmSettings_ = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(TR("Run"))) {
+        if (ImGui::MenuItem(TR(ICON_PLAY "  Run simulation"), "F5", false, !runner_.running())) runSimulation();
+        if (ImGui::MenuItem(TR(ICON_SQUARE "  Stop"), "Shift+F5", false, runner_.running())) runner_.cancel();
+        if (ImGui::MenuItem(TR(ICON_PLAY "  Restart from a report step..."), nullptr, showRestart_, !runner_.running())) showRestart_ = true;
+        if (ImGui::MenuItem(TR(ICON_CHECK "  Deck regression (OPM / ECLIPSE references)..."), nullptr, showRegress_)) showRegress_ = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem(TR("Engine: ResSim (built-in)"), nullptr, settings_.engine == 0)) { settings_.engine = 0; saveSettings(); }
+        if (ImGui::MenuItem(TR("Engine: OPM Flow (external)"), nullptr, settings_.engine == 1)) { settings_.engine = 1; saveSettings(); detectFlow(false); }
+        if (ImGui::MenuItem(TR("Engine: ECLIPSE (external, licensed)"), nullptr, settings_.engine == 2)) { settings_.engine = 2; saveSettings(); detectEclipse(false); }
+        if (ImGui::MenuItem(TR(ICON_SETTINGS "  Simulation engine settings (OPM Flow / ECLIPSE)..."))) showOpmSettings_ = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem(TR(ICON_ARROW_DOWN_TO_LINE "  Compute initial state"))) { computeInit(); section_ = Section::Init; }
+        if (ImGui::MenuItem(TR(ICON_CHECK "  Validate inputs"))) {
             const std::string& v = validation();
             notify(v.empty() ? "All inputs are valid" : v);
         }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("View")) {
-        if (ImGui::MenuItem(ICON_BOX "  Model workspace", "Ctrl+1", workspace_ == Workspace::Model)) workspace_ = Workspace::Model;
-        if (ImGui::MenuItem(ICON_FILE_CODE "  Deck Editor (writing mode)", "Ctrl+2", workspace_ == Workspace::DeckEditor)) workspace_ = Workspace::DeckEditor;
-        if (ImGui::MenuItem(ICON_CHART_LINE "  Results workspace", "Ctrl+3", workspace_ == Workspace::Results)) workspace_ = Workspace::Results;
-        if (ImGui::MenuItem(ICON_FLASK_CONICAL "  Studies workspace (sensitivity / HM)", "Ctrl+4", workspace_ == Workspace::Studies)) workspace_ = Workspace::Studies;
+    if (ImGui::BeginMenu(TR("View"))) {
+        if (ImGui::MenuItem(TR(ICON_BOX "  Model workspace"), "Ctrl+1", workspace_ == Workspace::Model)) workspace_ = Workspace::Model;
+        if (ImGui::MenuItem(TR(ICON_FILE_CODE "  Deck Editor (writing mode)"), "Ctrl+2", workspace_ == Workspace::DeckEditor)) workspace_ = Workspace::DeckEditor;
+        if (ImGui::MenuItem(TR(ICON_CHART_LINE "  Results workspace"), "Ctrl+3", workspace_ == Workspace::Results)) workspace_ = Workspace::Results;
+        if (ImGui::MenuItem(TR(ICON_FLASK_CONICAL "  Studies workspace (sensitivity / HM)"), "Ctrl+4", workspace_ == Workspace::Studies)) workspace_ = Workspace::Studies;
+        if (ImGui::MenuItem(TR(ICON_MOUNTAIN "  Geomodel workspace (ResGeo)"), "Ctrl+5", workspace_ == Workspace::Geomodel)) workspace_ = Workspace::Geomodel;
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_LAYOUT_DASHBOARD "  Reset window layout")) resetLayout_ = true;
-        if (ImGui::MenuItem(ICON_MAXIMIZE "  Reset 3D camera") && viewOk_) view_.resetCamera();
-        if (ImGui::BeginMenu(ICON_ZOOM_IN "  Interface size")) {
+        if (ImGui::MenuItem(TR(ICON_LAYOUT_DASHBOARD "  Reset window layout"))) resetLayout_ = true;
+        if (ImGui::MenuItem(TR(ICON_MAXIMIZE "  Reset 3D camera")) && viewOk_) view_.resetCamera();
+        if (ImGui::BeginMenu(TR(ICON_ZOOM_IN "  Interface size"))) {
             static const float sizes[] = {0.70f, 0.80f, 0.90f, 1.00f, 1.15f, 1.30f, 1.50f};
             static const char* names[] = {"70 %  (very compact)", "80 %  (compact)", "90 %", "100 %  (default)", "115 %", "130 %", "150 %"};
             for (int i = 0; i < 7; ++i)
                 if (ImGui::MenuItem(names[i], nullptr, std::fabs(settings_.uiScale - sizes[i]) < 0.01f)) { settings_.uiScale = sizes[i]; setUiScale(sizes[i]); saveSettings(); }
             ImGui::Separator();
-            ImGui::TextDisabled("Ctrl + / Ctrl - / Ctrl 0");
+            ImGui::TextDisabled("%s", TR("Ctrl + / Ctrl - / Ctrl 0"));
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem(ICON_SETTINGS "  Settings...")) showOpmSettings_ = true;
+        if (ImGui::MenuItem(TR(ICON_LAYERS "  Case manager (variants)"), nullptr, showCases_)) showCases_ = !showCases_;
+        if (ImGui::MenuItem(TR(ICON_LIST_CHECKS "  Workflow editor (record / replay)"), nullptr, showWorkflow_)) showWorkflow_ = !showWorkflow_;
+        if (ImGui::BeginMenu(TR(ICON_PALETTE "  Appearance"))) {   // C40: theme / accent / 3-D background without opening Settings
+            ImGui::TextDisabled("%s", TR("Theme"));
+            for (int t = 0; t < 3; ++t)
+                if (ImGui::MenuItem(themeNames()[t], nullptr, settings_.theme == t)) { settings_.theme = t; applyColors(t, settings_.accent); saveSettings(); }
+            ImGui::Separator(); ImGui::TextDisabled("%s", TR("Accent colour"));
+            for (int a = 0; a < 5; ++a) {
+                const ImVec4 c = accentColor(a);
+                ImGui::PushStyleColor(ImGuiCol_Text, c); ImGui::Bullet(); ImGui::PopStyleColor(); ImGui::SameLine();
+                if (ImGui::MenuItem(accentNames()[a], nullptr, settings_.accent == a)) { settings_.accent = a; applyColors(settings_.theme, a); saveSettings(); }
+            }
+            ImGui::Separator(); ImGui::TextDisabled("%s", TR("3-D background (Model / Results)"));
+            for (int b = 0; b < 5; ++b)
+                if (ImGui::MenuItem(background3dNames()[b], nullptr, settings_.bg3d == b)) { settings_.bg3d = b; set3dBackground(b); saveSettings(); }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(TR("Language"))) {   // C41 (G13)
+            static std::vector<i18n::Language> langs;
+            if (ImGui::IsWindowAppearing() || langs.empty()) langs = i18n::available();
+            for (const auto& l : langs)
+                if (ImGui::MenuItem(l.name.c_str(), l.code.c_str(), settings_.language == l.code)) {
+                    settings_.language = l.code; i18n::setLanguage(l.code); saveSettings();
+                }
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", TR("Catalogues: lang/<code>.txt next to the program."));
+            ImGui::TextDisabled("%s", TR("Partial translation: menus, toolbar, workspaces."));
+            ImGui::TextDisabled("%s", TR("Scripts that need shaping (Bengali, Arabic, ...) are not supported yet."));
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem(TR(ICON_SETTINGS "  Settings..."))) showOpmSettings_ = true;
         ImGui::Separator();
-        if (ImGui::MenuItem("Result Viewer (ECLIPSE / OPM output, compare)", nullptr, showResultViewer_)) showResultViewer_ = !showResultViewer_;
-        if (ImGui::MenuItem("Deck import report", nullptr, showDeckTools_ && deckTab_ == 0)) { showDeckTools_ = true; deckTab_ = 0; deckTabSet_ = true; }
-        if (ImGui::MenuItem("ECLIPSE keyword reference", nullptr, showDeckTools_ && deckTab_ == 1)) { showDeckTools_ = true; deckTab_ = 1; deckTabSet_ = true; }
+        if (ImGui::MenuItem(TR("Result Viewer (ECLIPSE / OPM output, compare)"), nullptr, showResultViewer_)) showResultViewer_ = !showResultViewer_;
+        if (ImGui::MenuItem(TR("Deck import report"), nullptr, showDeckTools_ && deckTab_ == 0)) { showDeckTools_ = true; deckTab_ = 0; deckTabSet_ = true; }
+        if (ImGui::MenuItem(TR("ECLIPSE keyword reference"), nullptr, showDeckTools_ && deckTab_ == 1)) { showDeckTools_ = true; deckTab_ = 1; deckTabSet_ = true; }
         ImGui::Separator();
-        ImGui::MenuItem("UI demo windows (developer)", nullptr, &showImGuiDemo_);
+        ImGui::MenuItem(TR("UI demo windows (developer)"), nullptr, &showImGuiDemo_);
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Tools")) {
-        if (ImGui::MenuItem(ICON_FLASK_CONICAL "  Studies workspace: sensitivity & history matching", "Ctrl+4")) workspace_ = Workspace::Studies;
-        if (ImGui::MenuItem(ICON_PANEL_BOTTOM "  Studies panel (Model workspace)", nullptr, showStudies_)) { showStudies_ = true; ImGui::SetWindowFocus("Studies"); }
-        if (ImGui::MenuItem(ICON_ROUTE "  Streamlines in 3D viewer", nullptr, sl_.show)) sl_.show = !sl_.show;
+    if (ImGui::BeginMenu(TR("Tools"))) {
+        if (ImGui::MenuItem(TR(ICON_FLASK_CONICAL "  Studies workspace: sensitivity & history matching"), "Ctrl+4")) workspace_ = Workspace::Studies;
+        if (ImGui::MenuItem(TR(ICON_PANEL_BOTTOM "  Studies panel (Model workspace)"), nullptr, showStudies_)) { showStudies_ = true; ImGui::SetWindowFocus("Studies"); }
+        if (ImGui::MenuItem(TR(ICON_ROUTE "  Streamlines in 3D viewer"), nullptr, sl_.show)) sl_.show = !sl_.show;
+        if (ImGui::MenuItem(TR(ICON_ACTIVITY "  Geomechanics: fault & fracture stability"), nullptr, showStability_)) { showStability_ = !showStability_; stabDock_ = showStability_; }
+        if (ImGui::MenuItem(TR(ICON_ACTIVITY "  Geomechanics: seismicity-aware injection design"), nullptr, showSeis_)) { showSeis_ = !showSeis_; seisDock_ = showSeis_; }
+        if (ImGui::MenuItem(TR(ICON_ACTIVITY "  Geomechanics: fracture contact & slip (2-D)"), nullptr, showEfem_)) { showEfem_ = !showEfem_; efemDock_ = showEfem_; }
         ImGui::Separator();
-        if (ImGui::MenuItem("Convert grid to corner-point (COORD/ZCORN)", nullptr, false, !case_.grid.cornerPoint())) {
+        if (ImGui::MenuItem(TR("Convert grid to corner-point (COORD/ZCORN)"), nullptr, false, !case_.grid.cornerPoint())) {
             convertToCornerPoint(case_.grid); markDirty(true); notify("Grid converted to corner-point geometry");
         }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Help")) {
-        if (ImGui::MenuItem(ICON_INFO "  About ResSim Studio")) showAbout_ = true;
+    if (ImGui::BeginMenu(TR("Help"))) {
+        if (ImGui::MenuItem(TR(ICON_BOOK_OPEN "  User guide (all features & examples)"), "F1")) openUserGuide();
+        if (ImGui::MenuItem(TR(ICON_SEARCH "  Command palette"), "Ctrl+Shift+P")) { paletteOpen_ = true; paletteBuf_[0] = 0; paletteSel_ = 0; paletteFocus_ = true; }
+        if (ImGui::MenuItem(TR(ICON_HOUSE "  Start page"))) showStart_ = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem(TR(ICON_INFO "  About ResSim Studio"))) showAbout_ = true;
         ImGui::EndMenu();
     }
     // right-aligned case title
@@ -362,39 +501,50 @@ void App::toolbar() {
     if (ImGui::BeginViewportSideBar("##toolbar", ImGui::GetMainViewport(), ImGuiDir_Up, h,
                                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings)) {
         auto tip = [](const char* t) { if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", t); };
-        if (ImGui::Button(ICON_FILE_PLUS " New")) ImGui::OpenPopup("newpop");
-        tip("New case");
+        if (ImGui::Button(TR(ICON_FILE_PLUS " New"))) ImGui::OpenPopup("newpop");
+        tip(TR("New case"));
         if (ImGui::BeginPopup("newpop")) {
-            if (ImGui::Selectable("Demo: 3-phase waterflood")) { if (maybeSaveChanges()) newCase(0); }
-            if (ImGui::Selectable("Validation: 1D Buckley-Leverett")) { if (maybeSaveChanges()) newCase(1); }
-            if (ImGui::Selectable("Blank model")) { if (maybeSaveChanges()) newCase(2); }
+            if (ImGui::Selectable(TR("Demo: 3-phase waterflood"))) { if (maybeSaveChanges()) newCase(0); }
+            if (ImGui::Selectable(TR("Validation: 1D Buckley-Leverett"))) { if (maybeSaveChanges()) newCase(1); }
+            if (ImGui::Selectable(TR(ICON_WAND_SPARKLES "  Model wizard..."))) showWizard_ = true;   // C40
+            if (ImGui::Selectable(TR("Blank model"))) { if (maybeSaveChanges()) newCase(2); }
             ImGui::Separator();
-            if (ImGui::BeginMenu("Examples")) { examplesMenu(true); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu(TR("Examples"))) { examplesMenu(true); ImGui::EndMenu(); }
             ImGui::EndPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button(ICON_FOLDER_OPEN " Open")) openDialog();
-        tip("Open project (Ctrl+O)");
+        if (ImGui::Button(TR(ICON_FOLDER_OPEN " Open"))) openDialog();
+        tip(TR("Open project (Ctrl+O)"));
         ImGui::SameLine();
-        if (ImGui::Button(ICON_SAVE " Save")) save(false);
-        tip("Save project (Ctrl+S)");
+        if (ImGui::Button(TR(ICON_SAVE " Save"))) save(false);
+        tip(TR("Save project (Ctrl+S)"));
         ImGui::SameLine();
-        ImGui::TextDisabled("|");
+        ImGui::BeginDisabled(!canUndo());
+        if (ImGui::Button(TR(ICON_UNDO_2 "##undo"))) undoApply(-1);
+        ImGui::EndDisabled();
+        tip(TR("Undo the last model edit (Ctrl+Z)"));
+        ImGui::SameLine(0, 2);
+        ImGui::BeginDisabled(!canRedo());
+        if (ImGui::Button(TR(ICON_REDO_2 "##redo"))) undoApply(+1);
+        ImGui::EndDisabled();
+        tip(TR("Redo (Ctrl+Y)"));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", TR("|"));
         ImGui::SameLine();
         workspaceSwitch();
         ImGui::SameLine();
-        ImGui::TextDisabled("|");
+        ImGui::TextDisabled("%s", TR("|"));
         ImGui::SameLine();
         const bool running = runner_.running();
         ImGui::BeginDisabled(running);
         if (ui::accentButton(ICON_PLAY "  Run")) runSimulation();
         ImGui::EndDisabled();
-        tip("Run the full simulation (F5)");
+        tip(TR("Run the full simulation (F5)"));
         ImGui::SameLine();
         ImGui::BeginDisabled(!running);
         if (ui::dangerButton(ICON_SQUARE "  Stop")) runner_.cancel();
         ImGui::EndDisabled();
-        tip("Stop the running simulation (Shift+F5)");
+        tip(TR("Stop the running simulation (Shift+F5)"));
         ImGui::SameLine();
         {
             static const char* engines[] = {"ResSim", "OPM Flow", "ECLIPSE"};
@@ -406,36 +556,53 @@ void App::toolbar() {
                 if (settings_.engine == 2) detectEclipse(false);
             }
             ImGui::EndDisabled();
-            tip("Simulation engine used by Run: ResSim (built-in), OPM Flow (external flow.exe) or ECLIPSE (licensed eclrun / eclipse.exe). Settings: Run menu.");
+            tip(TR("Simulation engine used by Run: ResSim (built-in), OPM Flow (external flow.exe) or ECLIPSE (licensed eclrun / eclipse.exe). Settings: Run menu."));
             ImGui::SameLine();
-            if (ImGui::Button(ICON_SETTINGS "##eng")) showOpmSettings_ = true;
-            tip("Simulation engine settings (OPM Flow / ECLIPSE executable, auto-detect, options)");
+            if (ImGui::Button(TR(ICON_SETTINGS "##eng"))) showOpmSettings_ = true;
+            tip(TR("Simulation engine settings (OPM Flow / ECLIPSE executable, auto-detect, options)"));
             ImGui::SameLine();
         }
-        if (ImGui::Button(ICON_ARROW_DOWN_TO_LINE " Initialise")) { computeInit(); section_ = Section::Init; }
-        tip("Compute the equilibrium initial state and fluids in place");
+        if (ImGui::Button(TR(ICON_ARROW_DOWN_TO_LINE " Initialise"))) { computeInit(); section_ = Section::Init; }
+        tip(TR("Compute the equilibrium initial state and fluids in place"));
         ImGui::SameLine();
-        if (ImGui::Button(ICON_CHECK " Validate")) {
+        if (ImGui::Button(TR(ICON_CHECK " Validate"))) {
             const std::string& v = validation();
             notify(v.empty() ? "All inputs are valid" : v);
         }
-        tip("Check all inputs for consistency");
+        tip(TR("Check all inputs for consistency"));
         ImGui::SameLine();
+        // right side: validation indicator
+        const std::string& v = validation();
+        const bool ext = !case_.engineUnsupported.empty();
+        const char* st = ext ? TR(ICON_INFO " OPM Flow / ECLIPSE deck") : !v.empty() ? TR(ICON_TRIANGLE_ALERT " Input problem")
+                         : case_.thermal.enabled ? TR(ICON_CHECK " Thermal model valid")
+                         : case_.comp.enabled ? (case_.comp.co2store ? TR(ICON_CHECK " CO2 storage model valid") : TR(ICON_CHECK " Compositional model valid"))
+                         : TR(ICON_CHECK " Inputs valid");
+        const float w = ImGui::CalcTextSize(st).x;
+        // the progress bar shares the row with the validation indicator: shrink it (or drop the indicator) on narrow windows
+        const float rowEnd = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x * 2;
+        bool showStatus = true;
         if (running) {
             ImGui::SameLine();
             char b[64]; std::snprintf(b, sizeof(b), "%.0f%%  (%.1f s)", runner_.progress() * 100.0, runner_.wallSeconds());
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+            const float fsz = ImGui::GetFontSize(), room = rowEnd - ImGui::GetCursorPosX() - w - fsz;
+            showStatus = room >= fsz * 6;
+            const float bw = std::max(fsz * 6, std::min(fsz * 14, showStatus ? room : rowEnd - ImGui::GetCursorPosX()));
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col4(Pal::Accent));
-            ImGui::ProgressBar(float(runner_.progress()), ImVec2(ImGui::GetFontSize() * 14, 0), b);
+            ImGui::ProgressBar(float(runner_.progress()), ImVec2(bw, 0), b);
             ImGui::PopStyleColor();
         }
-        // right side: validation indicator
-        const std::string& v = validation();
-        const char* st = v.empty() ? ICON_CHECK " Inputs valid" : ICON_TRIANGLE_ALERT " Input problem";
-        const float w = ImGui::CalcTextSize(st).x;
+        if (showStatus) {
         ImGui::SameLine(ImGui::GetWindowWidth() - w - ImGui::GetStyle().WindowPadding.x * 2);
-        ImGui::TextColored(col4(v.empty() ? Pal::Ok : Pal::Warn), "%s", st);
-        if (!v.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", v.c_str());
+        ImGui::TextColored(col4(ext ? Pal::Accent : v.empty() ? Pal::Ok : Pal::Warn), "%s", st);
+        if (ext && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("This deck uses features the ResSim engine cannot model. It is shown with placeholders\n"
+                                   "where needed and runs unchanged (original file) with OPM Flow or ECLIPSE:");
+            for (auto& r : case_.engineUnsupported) ImGui::BulletText("%s", r.c_str());
+            ImGui::EndTooltip();
+        } else if (!v.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", v.c_str());
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -444,10 +611,10 @@ void App::toolbar() {
 void App::statusBar() {
     const float h = ImGui::GetFrameHeight();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetStyle().WindowPadding.x, 2));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.055f, 0.06f, 0.07f, 1));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, themeStatusBg());
     if (ImGui::BeginViewportSideBar("##status", ImGui::GetMainViewport(), ImGuiDir_Down, h, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings)) {
         if (runner_.running()) ImGui::TextColored(col4(Pal::Accent), ICON_ACTIVITY " Running  %.0f%%", runner_.progress() * 100.0);
-        else ImGui::TextColored(col4(Pal::Ok), ICON_CIRCLE_DOT " Ready");
+        else ImGui::TextColored(col4(Pal::Ok), "%s", TR(ICON_CIRCLE_DOT " Ready"));
         if (study_.running) { ImGui::SameLine(0, 16); ImGui::TextColored(col4(Pal::Accent), ICON_FLASK_CONICAL " study %d / %d", int(study_.done), int(study_.total)); }
         ImGui::SameLine(0, 24);
         ImGui::TextDisabled(ICON_FILE " %s%s", path_.empty() ? "(not saved)" : path_.c_str(), dirty_ ? "  - modified" : "");
@@ -458,8 +625,10 @@ void App::statusBar() {
         ImGui::SameLine(0, 24);
         if (preview_) ImGui::TextDisabled(ICON_GRID_3X3 " %d active cells", preview_->numActive());
         else ImGui::TextColored(col4(Pal::Err), "grid error");
+        ImGui::SameLine(0, 24);
+        notificationButton();
         char r[96];
-        const int thr = case_.tuning.threads > 0 ? case_.tuning.threads : int(std::max(1u, std::thread::hardware_concurrency()));
+        const int thr = case_.tuning.threads > 0 ? case_.tuning.threads : ressim::physicalCores();
         std::snprintf(r, sizeof(r), ICON_CPU " %d CPU threads  |  %.0f fps", thr, ImGui::GetIO().Framerate);
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(r).x - ImGui::GetStyle().WindowPadding.x * 2);
         ImGui::TextDisabled("%s", r);
@@ -477,16 +646,21 @@ void App::panelCase() {
     if (g_fonts.bold) ImGui::PopFont();
     ImGui::TextDisabled("%s", path_.empty() ? "unsaved project" : baseName(path_).c_str());
     ImGui::Spacing();
+    if (ImGui::CollapsingHeader(ICON_LIST_CHECKS "  Workflow", ImGuiTreeNodeFlags_DefaultOpen)) workflowChecklist();
+    if (ImGui::CollapsingHeader(ICON_FOLDER_TREE "  Objects", ImGuiTreeNodeFlags_DefaultOpen)) objectTree();   // C40
     ui::header("Model inputs");
     for (int s = 0; s < int(Section::Count); ++s) {
         const std::string st = sectionStatus(Section(s));
         ImGui::PushID(s);
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        char lb[96]; std::snprintf(lb, sizeof(lb), "   %s  %s", kSectionIcons[s], kSectionNames[s]);
+        char lb[96]; std::snprintf(lb, sizeof(lb), "   %s  %s", kSectionIcons[s], TR(kSectionNames[s]));
         if (ImGui::Selectable(lb, section_ == Section(s), 0, ImVec2(0, ImGui::GetFrameHeight()))) section_ = Section(s);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s%s%s", kSectionHelp[s], st.empty() ? "" : "\n\nProblem: ", st.c_str());
-        const float r = ImGui::GetFontSize() * 0.22f;
-        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(p.x + r + 2, p.y + ImGui::GetFrameHeight() * 0.5f), r, st.empty() ? Pal::Ok : Pal::Err);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s%s%s %s", TR(kSectionHelp[s]), st.empty() ? "" : "\n\n", st.empty() ? "" : TR("Problem:"), st.c_str());
+        {   // C40 (G12): status by icon and colour (not colour alone)
+            const float fs = ImGui::GetFontSize() * 0.8f;
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), fs, ImVec2(p.x + 1, p.y + (ImGui::GetFrameHeight() - fs) * 0.5f), st.empty() ? Pal::Ok : Pal::Err,
+                                                st.empty() ? ICON_CHECK : ICON_TRIANGLE_ALERT);
+        }
         ImGui::PopID();
     }
     ImGui::Spacing();
@@ -530,10 +704,10 @@ void App::panelEditor() {
     if (!ImGui::Begin("Inspector")) { ImGui::End(); return; }
     const int s = int(section_);
     if (g_fonts.title) ImGui::PushFont(g_fonts.title, 0.0f);
-    ImGui::Text("%s  %s", kSectionIcons[s], kSectionNames[s]);
+    ImGui::Text("%s  %s", kSectionIcons[s], TR(kSectionNames[s]));
     if (g_fonts.title) ImGui::PopFont();
     ImGui::PushStyleColor(ImGuiCol_Text, col4(Pal::Muted));
-    ImGui::TextWrapped("%s", kSectionHelp[s]);
+    ImGui::TextWrapped("%s", TR(kSectionHelp[s]));   // C48: translated section help
     ImGui::PopStyleColor();
     const std::string st = sectionStatus(section_);
     if (!st.empty()) {
@@ -545,8 +719,35 @@ void App::panelEditor() {
         ImGui::EndChild();
         ImGui::PopStyleColor();
     }
+    // C40 (G11): filter the property rows of the section by label (Ctrl+F in the Inspector, Esc clears)
+    std::string& flt = inspFilter_;
+    {
+        ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() * 2 - ImGui::GetStyle().ItemSpacing.x * 2);
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) ImGui::SetKeyboardFocusHere();
+        ui::inputStringHint("##inspFilter", ICON_SEARCH "  Filter properties (Ctrl+F)", &flt);
+        if (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) flt.clear();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(flt.empty());
+        if (ImGui::Button(ICON_X "##fltclr", ImVec2(ImGui::GetFrameHeight(), 0))) flt.clear();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Clear the filter");
+        // C41: show only the properties modified since the baseline (project open / new / import, or "set baseline")
+        ui::ModTrack& mt = ui::modTrack();
+        ImGui::SameLine();
+        const bool on = mt.onlyModified;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button(ICON_PENCIL "##onlymod", ImVec2(ImGui::GetFrameHeight(), 0))) mt.onlyModified = !mt.onlyModified;
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nRight-click: set the current values as the new baseline",
+                                                      on ? "Showing only modified properties (click: show all)" : "Show only properties modified since the project was opened");
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { ui::modBaselineReset(); notify("Inspector baseline set to the current values"); }
+    }
     ImGui::Separator();
     ImGui::BeginChild("editor", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_None);
+    ui::PropFilter& pf = ui::propFilter();
+    pf.active = !flt.empty(); pf.text = flt; pf.shown = pf.hidden = 0;
+    ui::ModTrack& mt = ui::modTrack();
+    mt.inInspector = true; mt.modified = mt.hidden = 0;
     ImGui::PushID(s);
     switch (section_) {
         case Section::Runspec: editRunspec(); break;
@@ -563,6 +764,18 @@ void App::panelEditor() {
         default: break;
     }
     ImGui::PopID();
+    if (pf.active) {
+        ImGui::Spacing();
+        if (pf.shown == 0) ImGui::TextDisabled(ICON_FILTER "  No property of the open groups matches \"%s\" (closed groups and other tabs are not searched)", flt.c_str());
+        else ImGui::TextDisabled(ICON_FILTER "  %d matching, %d hidden by the filter", pf.shown, pf.hidden);
+    }
+    mt.inInspector = false;
+    if (mt.onlyModified) {
+        ImGui::Spacing();
+        if (mt.modified == 0) ImGui::TextDisabled(ICON_PENCIL "  No modified property in the open groups of this section (closed groups and other tabs are not searched)");
+        else ImGui::TextDisabled(ICON_PENCIL "  %d modified, %d unmodified hidden", mt.modified, mt.hidden);
+    }
+    pf.active = false;
     ImGui::EndChild();
     ImGui::End();
 }
@@ -637,7 +850,12 @@ void App::aboutWindow() {
             "Numerics: Newton-Raphson with forward-mode automatic differentiation, CPR (AMG pressure) or ILU(0) "
             "preconditioned BiCGSTAB/GMRES, OpenMP-parallel assembly and sparse kernels.\n\n"
             "Studies: parallel batch runner, tornado and Latin-hypercube Monte Carlo sensitivity, manual history "
-            "matching, Levenberg-Marquardt and ES-MDA assisted history matching. Pollock streamlines with "
+            "matching, Levenberg-Marquardt (finite-difference or exact forward-sensitivity Jacobian), discrete-adjoint "
+            "L-BFGS and ES-MDA assisted history matching. Multi-component product analysis (H2, syngas, heating "
+            "values) for compositional, CO2 and thermal / UCG runs. Unified multi-component framework: Henry-law "
+            "solubility (IAPWS G7-04), Peng-Robinson gas and convex three-phase flash in the thermal core, with the same "
+            "CO2 trapping inventory (structural, residual, dissolved, mineral) as the compositional / CO2STORE cores and "
+            "per-component 3D maps over time. Pollock streamlines with "
             "time-of-flight, drainage regions and well allocation.\n\n"
             "Graphics: Direct3D 11 (3D grid viewer with MSAA, picking, filters and colour maps), "
             "Direct2D/DirectWrite (viewport text and legends), Dear ImGui docking UI and ImPlot charts.");
@@ -650,6 +868,7 @@ void App::aboutWindow() {
 
 // ============================================================================ actions
 void App::notify(const std::string& msg) {
+    pushNote(msg);
     toast_ = msg;
     toastUntil_ = ImGui::GetTime() + 3.5;
     runner_.addLog("[ui] " + msg);
@@ -706,6 +925,64 @@ void App::computeInit() {
     try {
         const std::string v = validation();
         if (!v.empty()) throw std::runtime_error(v);
+        if (case_.thermal.enabled) {   // thermal: initial state of the thermal core (p, T, saturations)
+            thermal::DeckModel m; std::string err;
+            if (!thermal::deckModel(case_, m, &err)) throw std::runtime_error(err);
+            const double pu = case_.units == UnitSystem::Field ? 6894.757293168 : 1e5;
+            bool got = false;
+            std::vector<thermal::Summary> out;
+            thermal::runDeckModel(m, out, [&](const thermal::Summary& S, const thermal::Simulator& sim) {
+                const size_t n = sim.pressure().size();
+                init_.p.resize(n); init_.sw.resize(n); init_.sg.resize(n); init_.so.resize(n); init_.rs.assign(n, 0.0f);
+                for (size_t q = 0; q < n; ++q) {
+                    init_.p[q] = float(sim.pressure()[q] / pu); init_.sw[q] = float(sim.sw()[q]);
+                    init_.sg[q] = float(sim.sg()[q]); init_.so[q] = float(sim.so()[q]);
+                }
+                init_.ip.oil = S.foip;
+                got = true;
+                return false;
+            }, &err, 0);
+            if (!got) throw std::runtime_error(err.empty() ? "initialisation produced no state" : err);
+            init_.grid = std::make_shared<Grid>(); init_.grid->build(case_);
+            if (int(init_.p.size()) != init_.grid->numActive()) throw std::runtime_error("thermal cell count differs from the grid");
+            init_.depth = init_.grid->depth;
+            init_.valid = true;
+            init_.caseVersion = caseVersion_;
+            prop_ = 6;
+            notify("Initial state computed (thermal core)");
+            return;
+        }
+        if (case_.comp.enabled) {   // compositional / CO2STORE: equilibrate with the EOS (or CO2-brine) model
+            comp::DeckModel m; std::string err;
+            if (!comp::deckModel(case_, m, &err)) throw std::runtime_error(err);
+            const double pu = case_.units == UnitSystem::Field ? 6894.757293168 : 1e5;
+            const bool co2 = case_.comp.co2store;
+            bool got = false;
+            std::vector<comp::CompSummary> out;
+            comp::runDeckModel(m, out, [&](const comp::CompSummary& S, const comp::CompSimulator& sim) {
+                const auto& P = sim.pressure();
+                const std::vector<double> sg = sim.gasSaturation(), sw = sim.waterSaturation();
+                const size_t n = P.size();
+                init_.p.resize(n); init_.sw.resize(n); init_.sg.resize(n); init_.so.resize(n); init_.rs.assign(n, 0.0f);
+                for (size_t q = 0; q < n; ++q) {
+                    init_.p[q] = float(P[q] / pu); init_.sg[q] = float(sg[q]);
+                    init_.sw[q] = float(co2 ? 1.0 - sg[q] : sw[q]);
+                    init_.so[q] = float(co2 ? 0.0 : std::max(0.0, 1.0 - sw[q] - sg[q]));
+                }
+                init_.ip.oil = S.foip; init_.ip.water = S.fwip; init_.ip.gasFree = S.fgip;
+                got = true;
+                return false;   // initial state only
+            }, &err, 0);
+            if (!got) throw std::runtime_error(err.empty() ? "initialisation produced no state" : err);
+            init_.grid = std::make_shared<Grid>(); init_.grid->build(case_);
+            if (int(init_.p.size()) != init_.grid->numActive()) throw std::runtime_error("compositional cell count differs from the grid");
+            init_.depth = init_.grid->depth;
+            init_.valid = true;
+            init_.caseVersion = caseVersion_;
+            prop_ = 6;
+            notify(co2 ? "Initial state computed (CO2-brine equilibrium)" : "Initial state computed (EOS equilibration)");
+            return;
+        }
         Simulator sim;
         sim.setup(case_);
         sim.initialize();
@@ -727,12 +1004,38 @@ void App::computeInit() {
 
 void App::runSimulation() {
     if (runner_.running()) return;
-    if (!case_.externalOnly.empty() && settings_.engine == 0) {
-        notify("The ResSim engine cannot run this deck (" + case_.externalOnly.substr(0, 160) + ") - choose OPM Flow or ECLIPSE as the engine (toolbar engine box); they run the original deck unchanged");
+    runner_.setRestartSaving(settings_.rstEvery, settings_.rstLast);
+    // decks with features the ResSim engine cannot model are run by OPM Flow / ECLIPSE on the original file
+    const bool extOnly = !case_.engineUnsupported.empty() && !srcDeck_.empty();
+    // E300 compositional decks (COMPS): the built-in engine runs them on its EOS compositional core
+    if (case_.thermal.enabled && settings_.engine == 0) {   // E300 THERMAL case: STARS-like thermal core
+        const std::string tv = validateThermal(case_);
+        if (!tv.empty()) { notify("Cannot run: " + tv); return; }
+        runner_.startThermal(case_);
+        resultsCaseVersion_ = caseVersion_;
+        snap_ = 0;
+        if (prop_ < 9) prop_ = 9;
+        wasRunning_ = true;
         return;
     }
-    const std::string& v = case_.externalOnly.empty() ? validation() : std::string();
-    if (!v.empty()) {
+    bool compDeck = case_.comp.enabled;   // compositional / CO2STORE case (imported or built in the UI)
+    for (const auto& r : case_.engineUnsupported) if (r.rfind("compositional model", 0) == 0 && !srcDeck_.empty()) compDeck = true;
+    if (compDeck && settings_.engine == 0) {
+        runner_.startComp(case_, srcDeck_);
+        resultsCaseVersion_ = caseVersion_;
+        snap_ = 0;
+        if (prop_ < 9) prop_ = 9;
+        wasRunning_ = true;
+        return;
+    }
+    if (extOnly && settings_.engine == 0) {
+        showOpmSettings_ = true;
+        notify("This deck can only be run by OPM Flow or ECLIPSE (" + case_.engineUnsupported.front() +
+               ") - choose the engine in Run > Engine");
+        return;
+    }
+    const std::string& v = validation();
+    if (!v.empty() && !extOnly) {
         for (int s = 0; s < int(Section::Count); ++s) if (!sectionStatus(Section(s)).empty()) { section_ = Section(s); break; }
         notify("Cannot run: " + v);
         return;
@@ -750,6 +1053,10 @@ void App::runSimulation() {
         o.flowPath = eclDetected_;
         o.eclVersion = settings_.eclVersion;
         o.eclProgram = settings_.eclProgram == 1 ? "e300" : settings_.eclProgram == 2 ? "frontsim" : "eclipse";
+        if ((case_.thermal.enabled || case_.comp.enabled) && o.eclProgram != "e300") {   // THERMAL / COMPS decks need E300
+            o.eclProgram = "e300";
+            runner_.addLog("NOTE: thermal / compositional deck - running ECLIPSE 300 (e300)");
+        }
         o.runDir = runDirFor(path_, case_.title, "ECL");
         o.extraArgs = settings_.eclArgs;
         applySourceDeck(o);
@@ -773,8 +1080,12 @@ void App::runSimulation() {
             notify("OPM Flow does not support dual porosity (DUALPORO/DUALPERM) and will stop - run this model with ResSim or ECLIPSE");
         applySourceDeck(o);
         runner_.startOpm(case_, o);
-    } else
-    runner_.start(case_);
+    } else {
+        // C37 PYACTION: scripts are relative to the deck directory; the interpreter from the settings
+        if (case_.deckDir.empty() && !path_.empty()) case_.deckDir = std::filesystem::u8path(path_).parent_path().u8string();
+        if (case_.pythonExe.empty()) case_.pythonExe = settings_.pythonExe;
+        if (!startMpiDD()) runner_.start(case_);
+    }
     resultsCaseVersion_ = caseVersion_;
     snap_ = 0;
     if (prop_ < 9) prop_ = 9;             // PRESSURE (dynamic)
@@ -783,12 +1094,11 @@ void App::runSimulation() {
 
 // Imported deck not edited since the import: the external engine runs the original file (with its INCLUDEs) unchanged.
 void App::applySourceDeck(OpmOptions& o) {
-    if (!case_.externalOnly.empty() && !srcDeck_.empty()) {
-        // the model only holds display defaults: the original deck is always the one that runs
-        if (caseVersion_ != srcDeckVersion_)
-            runner_.addLog("NOTE: this deck can only run unchanged (ResSim could not convert it) - model edits are not used; "
-                           "edit the deck text in the Deck Editor instead.");
+    if (!case_.engineUnsupported.empty() && !srcDeck_.empty()) {
         o.sourceDeck = srcDeck_;
+        if (caseVersion_ != srcDeckVersion_)
+            runner_.addLog("NOTE: this deck uses features ResSim cannot represent - the ORIGINAL deck is run; model edits are not "
+                           "included (edit the deck text in the Deck Editor instead).");
         return;
     }
     if (srcDeck_.empty() || settings_.deckRunMode != 0) return;
@@ -851,9 +1161,12 @@ void App::syncBuildersFromCase() {
 
 void App::newCase(int which, const std::string& example) {
     Case ex;
-    if (which == 3) {
+    if (which == 4) {   // C13: a case built in the app (EGS designer); pendingCase_ must be set
+        if (!pendingCase_) return;
+        ex = std::move(*pendingCase_); pendingCase_.reset(); which = 3;
+    } else if (which == 3) {
         try { ex = makeExample(example); }
-        catch (const std::exception& e) { MessageBoxA(g_gfx.hwnd, e.what(), "Example", MB_OK | MB_ICONERROR); return; }
+        catch (const std::exception& e) { plat::msgBox(e.what(), "Example", MB_OK | MB_ICONERROR); return; }
     }
     runner_.cancel();
     if (!study_.running) { study_.hasTornado = study_.hasMC = study_.hasHM = study_.hasManual = false; }
@@ -881,14 +1194,16 @@ void App::newCase(int which, const std::string& example) {
         makeCoreySGOF(corey_, c.props.sgof);
         c.equil.datumDepth = 8045; c.equil.datumPressure = 4600;
         c.equil.owc = 8200; c.equil.goc = 7900; c.equil.initialRs = -1;
-        c.schedule.assign(20, ReportStep{91.3125, {}});
+        { ReportStep rs; rs.length = 91.3125; c.schedule.assign(20, rs); }
         case_ = c;
     }
     path_.clear();
+    variants_.clear(); casesSel_ = -1;   // C40 case manager
     dirty_ = false;
     init_ = InitPreview{};
     if (which != 2) syncBuildersFromCase();
     ++caseVersion_;
+    undoReset();
     resultsCaseVersion_ = 0;
     gridDirty_ = true;
     gridError_.clear();
@@ -933,7 +1248,7 @@ void App::examplesMenu(bool popup) {
 bool App::maybeSaveChanges() {
     if (!dirty_) return true;
     const std::string msg = "Save changes to \"" + (path_.empty() ? case_.title : baseName(path_)) + "\"?";
-    const int r = MessageBoxA(g_gfx.hwnd, msg.c_str(), "ResSim Studio", MB_YESNOCANCEL | MB_ICONQUESTION);
+    const int r = plat::msgBox(msg.c_str(), "ResSim Studio", MB_YESNOCANCEL | MB_ICONQUESTION);
     if (r == IDCANCEL) return false;
     if (r == IDYES) { save(false); return !dirty_; }
     return true;
@@ -941,7 +1256,7 @@ bool App::maybeSaveChanges() {
 
 bool App::confirmClose() {
     if (runner_.running()) {
-        if (MessageBoxA(g_gfx.hwnd, "A simulation is running. Stop it and exit?", "ResSim Studio", MB_OKCANCEL | MB_ICONWARNING) != IDOK) {
+        if (plat::msgBox("A simulation is running. Stop it and exit?", "ResSim Studio", MB_OKCANCEL | MB_ICONWARNING) != IDOK) {
             quit_ = false;
             return false;
         }
@@ -961,11 +1276,14 @@ void App::save(bool saveAs) {
     }
     try {
         saveProject(case_, p);
+        casesWrite(p);   // C40 case manager variants (<project>.cases)
         path_ = p;
         dirty_ = false;
+        recoveryClear();
+        addRecent(p);
         notify("Saved " + baseName(p));
     } catch (const std::exception& e) {
-        MessageBoxA(g_gfx.hwnd, e.what(), "Save failed", MB_OK | MB_ICONERROR);
+        plat::msgBox(e.what(), "Save failed", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -981,19 +1299,21 @@ void App::exportDeck() {
         exportEclipseDeck(case_, p);
         notify("Exported ECLIPSE deck " + baseName(p));
     } catch (const std::exception& e) {
-        MessageBoxA(g_gfx.hwnd, e.what(), "Export failed", MB_OK | MB_ICONERROR);
+        plat::msgBox(e.what(), "Export failed", MB_OK | MB_ICONERROR);
     }
 }
 
 void App::openDialog() {
     if (!maybeSaveChanges()) return;
     std::string p;
-    if (!fileDialog(false, "ResSim project or ECLIPSE deck\0*.rsim;*.DATA;*.data\0ResSim project (*.rsim)\0*.rsim\0ECLIPSE deck (*.DATA)\0*.DATA;*.data\0All files (*.*)\0*.*\0", "rsim", p)) return;
+    if (!fileDialog(false, "ResSim project, results or ECLIPSE deck\0*.rsim;*.rsres;*.DATA;*.data\0ResSim project (*.rsim)\0*.rsim\0ResSim results (*.rsres)\0*.rsres\0ECLIPSE deck (*.DATA)\0*.DATA;*.data\0All files (*.*)\0*.*\0", "rsim", p)) return;
     dirty_ = false;                       // already confirmed
     openFile(p);
 }
 
 void App::openFile(const std::string& path) {
+    showStart_ = false;
+    if (endsWithI(path, ".rsres")) { openResultsFile(path); addRecent(path); return; }
     for (const char* ext : {".SMSPEC", ".FSMSPEC", ".EGRID", ".FEGRID", ".UNRST", ".FUNRST", ".INIT", ".FINIT", ".UNSMRY", ".FUNSMRY"})
         if (endsWithI(path, ext)) { rvOpen(path); return; }
     if (endsWithI(path, ".DATA")) { if (maybeSaveChanges()) { dirty_ = false; importDeck(path); } return; }
@@ -1004,12 +1324,14 @@ void App::openFile(const std::string& path) {
         runner_.cancel(); runner_.join(); runner_.clear();
         case_ = std::move(c);
         path_ = path;
+        casesRead(path);   // C40
         dirty_ = false;
         init_ = InitPreview{};
         if (!study_.running) { study_.hasTornado = study_.hasMC = study_.hasHM = study_.hasManual = false; }
         sl_.res.reset();
         syncBuildersFromCase();
         ++caseVersion_;
+        undoReset();
         resultsCaseVersion_ = 0;
         gridDirty_ = true;
         rebuildPreview();
@@ -1017,9 +1339,10 @@ void App::openFile(const std::string& path) {
         prop_ = 1; snap_ = 0; play_ = false; viewGrid_ = nullptr;
         if (viewOk_) view_.resetCamera();
         runner_.addLog("=== Opened " + path);
+        addRecent(path);
         notify(v.empty() ? "Opened " + baseName(path) : "Opened with problems: " + v);
     } catch (const std::exception& e) {
-        MessageBoxA(g_gfx.hwnd, e.what(), "Open failed", MB_OK | MB_ICONERROR);
+        plat::msgBox(e.what(), "Open failed", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -1039,12 +1362,14 @@ void App::importDeck(const std::string& path) {
         runner_.cancel(); runner_.join(); runner_.clear();
         case_ = std::move(c);
         path_.clear();                    // a deck is imported, saving creates a .rsim project
+        variants_.clear(); casesSel_ = -1;
         dirty_ = true;
         init_ = InitPreview{};
         if (!study_.running) { study_.hasTornado = study_.hasMC = study_.hasHM = study_.hasManual = false; }
         sl_.res.reset();
         syncBuildersFromCase();
         ++caseVersion_;
+        undoReset();
         resultsCaseVersion_ = 0;
         gridDirty_ = true;
         rebuildPreview();
@@ -1053,17 +1378,18 @@ void App::importDeck(const std::string& path) {
         sl_.res.reset();
         if (viewOk_) view_.resetCamera();
         srcDeck_ = path; srcDeckVersion_ = caseVersion_;
+        addRecent(path);
         runner_.addLog("=== Imported ECLIPSE deck " + path);
         for (auto& w : warnings) runner_.addLog("  deck warning: " + w);
         char b[160];
         std::snprintf(b, sizeof(b), "Imported %s: %dx%dx%d%s, %d wells, %d report steps, %d warnings", baseName(path).c_str(), case_.grid.nx, case_.grid.ny,
                       case_.grid.nz, case_.grid.cornerPoint() ? " corner-point" : "", int(case_.wells.size()), int(case_.schedule.size()), int(warnings.size()));
-        if (!case_.externalOnly.empty()) {
-        notify(std::string(b) + " - external engines only: the ResSim engine cannot model this deck (see the import report)");
-        runner_.addLog("NOTE: ResSim cannot run this deck: " + case_.externalOnly + ". OPM Flow / ECLIPSE run the original file.");
-    } else notify(v.empty() ? std::string(b) : std::string(b) + " - problems: " + v);
+        if (!case_.engineUnsupported.empty())
+            notify(std::string(b) + " - for OPM Flow / ECLIPSE only: " + case_.engineUnsupported.front() +
+                   (case_.engineUnsupported.size() > 1 ? " (+" + std::to_string(case_.engineUnsupported.size() - 1) + " more, see the import report)" : std::string()));
+        else notify(v.empty() ? std::string(b) : std::string(b) + " - problems: " + v);
         if (!warnings.empty()) { showDeckTools_ = true; deckTab_ = 0; deckTabSet_ = true; }
     } catch (const std::exception& e) {
-        MessageBoxA(g_gfx.hwnd, e.what(), "ECLIPSE deck import failed", MB_OK | MB_ICONERROR);
+        plat::msgBox(e.what(), "ECLIPSE deck import failed", MB_OK | MB_ICONERROR);
     }
 }

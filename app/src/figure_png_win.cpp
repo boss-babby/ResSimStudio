@@ -5,6 +5,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <string>
@@ -147,6 +148,40 @@ public:
             cur += s[i++];
         }
         flush();
+        rt->SetTransform(old);
+    }
+    void fillTriangles(const double* xy, int nTri, uint32_t c) override {
+        if (nTri <= 0 || ((c >> 24) & 255) == 0) return;
+        ID2D1PathGeometry* g = nullptr;
+        if (FAILED(f->CreatePathGeometry(&g)) || !g) return;
+        ID2D1GeometrySink* sk = nullptr;
+        if (SUCCEEDED(g->Open(&sk)) && sk) {
+            sk->SetFillMode(D2D1_FILL_MODE_WINDING);
+            for (int t = 0; t < nTri; ++t) {
+                const double* q = xy + 6 * t;
+                sk->BeginFigure(D2D1::Point2F(float(q[0]), float(q[1])), D2D1_FIGURE_BEGIN_FILLED);
+                sk->AddLine(D2D1::Point2F(float(q[2]), float(q[3])));
+                sk->AddLine(D2D1::Point2F(float(q[4]), float(q[5])));
+                sk->EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+            sk->Close();
+            release(sk);
+            br->SetColor(col(c));
+            rt->FillGeometry(g, br);
+        }
+        release(g);
+    }
+    void textFit(double x, double y, const std::string& s, double size, double widthPt, bool vertical, uint32_t c) override {
+        if (s.empty()) return;
+        br->SetColor(col(c));
+        const double w = textWidth(s, size);
+        const float sx = (w > 0 && widthPt > 0) ? float(std::max(0.4, std::min(2.5, widthPt / w))) : 1.f;
+        D2D1_MATRIX_3X2_F old;
+        rt->GetTransform(&old);
+        D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(sx, 1.f);
+        if (vertical) m = m * D2D1::Matrix3x2F::Rotation(-90.f);
+        rt->SetTransform(m * D2D1::Matrix3x2F::Translation(float(x), float(y)) * old);
+        run(s, size, 0, 0);
         rt->SetTransform(old);
     }
     void pushClip(double x, double y, double w, double h) override {

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ResSim Studio
+GenericName=Reservoir Simulator
+Comment=Reservoir simulation, history matching and geomodelling
+Exec=ResSimStudio %f
+Icon=ressim-studio
+Terminal=false
+Categories=Science;Engineering;Geology;
+MimeType=text/plain;

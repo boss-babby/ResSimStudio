@@ -1,0 +1,19 @@
+h2c_CP_10_SG t60 25.84 t90 57.16 | DONE steps 335 newton 3658 cuts 36  FPR 303.2430  21.55 s
+h2c_CP_10_SGL t60 23.00 t90 53.41 | DONE steps 205 newton 3057 cuts 16  FPR 303.2439  18.00 s
+h2c_CP_5_SG t60 24.53 t90 55.40 | DONE steps 390 newton 4341 cuts 41  FPR 303.2301  54.69 s
+h2c_CP_5_SGL t60 22.80 t90 52.63 | DONE steps 452 newton 6398 cuts 52  FPR 303.2331  79.01 s
+h2c_CP_2.5_SG t60 24.00 t90 54.66 | DONE steps 597 newton 6185 cuts 105  FPR 303.2326  201.61 s
+h2c_CP_2.5_SGL t60 23.65 t90 53.62 | DONE steps 540 newton 6568 cuts 99  FPR 303.2370  305.27 s
+h2c_WAT_10_SG t60 28.67 t90 63.41 | DONE steps 342 newton 3728 cuts 38  FPR 301.7465  28.07 s
+h2c_WAT_10_SGL t60 25.31 t90 58.70 | DONE steps 212 newton 3279 cuts 17  FPR 301.7491  22.77 s
+h2c_WAT_5_SG t60 27.42 t90 61.47 | DONE steps 421 newton 4571 cuts 70  FPR 301.7328  75.83 s
+h2c_WAT_5_SGL t60 25.55 t90 58.69 | DONE steps 422 newton 5884 cuts 65  FPR 301.7380  84.48 s
+h2c_WAT_2.5_SG t60 26.84 t90 60.85 | DONE steps 739 newton 7457 cuts 171  FPR 301.7368  167.73 s
+h2c_WAT_2.5_SGL t60 26.00 t90 59.55 | DONE steps 629 newton 7363 cuts 141  FPR 301.7390  154.42 s
+h2c_GAS_10_SGL t60 0.44 t90 0.95 | DONE steps 141 newton 1670 cuts 9  FPR 308.6127  13.12 s
+h2c_GAS_10_SG t60 0.49 t90 1.06 | DONE steps 121 newton 1421 cuts 7  FPR 308.6127  11.65 s
+h2c_GAS_5_SGL t60 0.45 t90 0.98 | DONE steps 146 newton 1850 cuts 4  FPR 308.5422  30.69 s
+h2c_GAS_5_SG t60 0.46 t90 1.02 | DONE steps 155 newton 1818 cuts 6  FPR 308.5422  29.43 s
+h2c_GAS_2.5_SGL t60 0.42 t90 0.98 | DONE steps 149 newton 1885 cuts 1  FPR 308.5580  72.36 s
+h2c_GAS_2.5_SG t60 0.44 t90 0.98 | DONE steps 155 newton 1926 cuts 2  FPR 308.5580  76.53 s
+H2CDONE

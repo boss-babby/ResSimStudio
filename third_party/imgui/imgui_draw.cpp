@@ -2976,8 +2976,12 @@ void ImDrawList::AddText(ImFont* font, float font_size, const ImVec2& pos, ImU32
         clip_rect.z = ImMin(clip_rect.z, cpu_fine_clip_rect->z);
         clip_rect.w = ImMin(clip_rect.w, cpu_fine_clip_rect->w);
     }
+    if (GImDrawListTextHook != NULL && GImDrawListTextHookList == this)   // ResSim: exact plot export
+        GImDrawListTextHook(this, font, font_size, pos, col, text_begin, text_end, clip_rect, false);
     font->RenderText(this, font_size, pos, col, clip_rect, text_begin, text_end, wrap_width, (cpu_fine_clip_rect != NULL) ? ImDrawTextFlags_CpuFineClip : ImDrawTextFlags_None);
 }
+ImDrawListTextHookFn GImDrawListTextHook = NULL;
+ImDrawList*          GImDrawListTextHookList = NULL;
 
 void ImDrawList::AddText(const ImVec2& pos, ImU32 col, const char* text_begin, const char* text_end)
 {

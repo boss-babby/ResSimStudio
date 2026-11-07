@@ -1,0 +1,22 @@
+CONST u=1: RSF objective 2.35775e+15 (mean moment N m)
+TRAIN  0 [1.23 1.68 0.03 1.07] RSF 3.31532e+15
+TRAIN  1 [1.00 1.25 0.80 0.95] RSF 2.35779e+15
+TRAIN  2 [1.16 1.52 1.11 0.21] RSF 3.2815e+15
+TRAIN  3 [0.21 1.47 0.86 1.46] RSF 3.51122e+15
+TRAIN  4 [0.97 0.87 0.98 1.18] RSF 2.40937e+15
+TRAIN  5 [1.08 2.40 0.30 0.23] RSF 4.1233e+15
+TRAIN  6 [0.16 1.16 0.49 2.19] RSF 4.09725e+15
+TRAIN  7 [1.30 0.89 0.77 1.05] RSF 2.26482e+15
+TRAIN  8 [0.84 1.15 0.27 1.74] RSF 3.59734e+15
+TRAIN  9 [1.51 1.44 0.61 0.45] RSF 3.1135e+15
+TRAIN 10 [0.70 1.01 1.69 0.60] RSF 3.45658e+15
+TRAIN 11 [1.71 0.70 0.07 1.53] RSF 3.12581e+15
+FIT A_sigma 7701 Pa  tau_dot 0.02413 Pa/s (t_a 3.69 d)  scale 1.93e+14  deviance 0.054 (12 schedules)
+FIT R2 on training 0.854
+SURROGATE optimum [0.89 0.00 0.61 2.50] predicted 1.638e+15, RSF 4.0522e+15 (13 RSF evaluations incl. training)
+ES seed 0 best RSF 2.21503e+15 at [1.49 0.96 1.10 0.45] (60 evaluations)
+ES seed 1 best RSF 2.2142e+15 at [1.50 0.74 0.51 1.25] (60 evaluations)
+ES seed 2 best RSF 2.21745e+15 at [1.46 1.08 0.74 0.71] (60 evaluations)
+SUMMARY const 2.35775e+15 | surrogate 4.0522e+15 (13 evals) | ES median best 2.21503e+15 (60 evals x 3 seeds) | ratio 1.829 | RSF calls 194, 1464 s
+VERDICT REFUTED (> 1.15)
+H9BDONE

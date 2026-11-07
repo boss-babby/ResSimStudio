@@ -1,0 +1,35 @@
+F1 Pi 1.0: G numeric 2.176% | 2-arc (pre-reg) 1.237% | 3-arc 2.176% (tb 0.0037, s* 0.9221, s_end 1.576) | plateau var 1.07% | early stop False | terminal burst vol 0.0336
+F1 Pi 3.0: G numeric 7.946% | 2-arc (pre-reg) 5.392% | 3-arc 7.946% (tb 0.0026, s* 0.9320, s_end 1.392) | plateau var 0.58% | early stop True | terminal burst vol 0.0239
+F1 Pi 6.0: G numeric 18.135% | 2-arc (pre-reg) 14.058% | 3-arc 18.135% (tb 0.0018, s* 0.9388, s_end 1.263) | plateau var 0.24% | early stop False | terminal burst vol 0.0166
+F2 [reg] Pi 1.0 u    3 th 0.010: numeric 0.418%  3-arc 0.418%  law(pre-reg) 0.245% (ratio 1.705)  law(revised) 0.432% (ratio 0.967)
+F2 [reg] Pi 1.0 u    3 th 0.020: numeric 0.808%  3-arc 0.808%  law(pre-reg) 0.490% (ratio 1.648)  law(revised) 0.864% (ratio 0.935)
+F2 [reg] Pi 1.0 u   10 th 0.010: numeric 0.505%  3-arc 0.506%  law(pre-reg) 0.300% (ratio 1.683)  law(revised) 0.525% (ratio 0.963)
+F2 [reg] Pi 1.0 u   10 th 0.020: numeric 0.974%  3-arc 0.974%  law(pre-reg) 0.601% (ratio 1.622)  law(revised) 1.049% (ratio 0.928)
+F2 [reg] Pi 3.0 u    3 th 0.010: numeric 1.545%  3-arc 1.545%  law(pre-reg) 1.062% (ratio 1.455)  law(revised) 1.597% (ratio 0.967)
+F2 [reg] Pi 3.0 u    3 th 0.020: numeric 2.989%  3-arc 2.989%  law(pre-reg) 2.124% (ratio 1.407)  law(revised) 3.194% (ratio 0.936)
+F2 [reg] Pi 3.0 u   10 th 0.010: numeric 1.845%  3-arc 1.845%  law(pre-reg) 1.291% (ratio 1.429)  law(revised) 1.915% (ratio 0.963)
+F2 [reg] Pi 3.0 u   10 th 0.020: numeric 3.554%  3-arc 3.554%  law(pre-reg) 2.583% (ratio 1.376)  law(revised) 3.831% (ratio 0.928)
+F2 [reg] Pi 6.0 u    3 th 0.010: numeric 3.634%  3-arc 3.634%  law(pre-reg) 2.832% (ratio 1.284)  law(revised) 3.776% (ratio 0.963)
+F2 [reg] Pi 6.0 u    3 th 0.020: numeric 6.999%  3-arc 6.999%  law(pre-reg) 5.663% (ratio 1.236)  law(revised) 7.551% (ratio 0.927)
+F2 [reg] Pi 6.0 u   10 th 0.010: numeric 4.300%  3-arc 4.300%  law(pre-reg) 3.416% (ratio 1.259)  law(revised) 4.495% (ratio 0.957)
+F2 [reg] Pi 6.0 u   10 th 0.020: numeric 8.233%  3-arc 8.234%  law(pre-reg) 6.832% (ratio 1.205)  law(revised) 8.990% (ratio 0.916)
+F2 [fresh] Pi 2.0 u    3 th 0.015: numeric 1.385%  3-arc 1.385%  law(pre-reg) 0.904% (ratio 1.531)  law(revised) 1.455% (ratio 0.952)
+F2 [fresh] Pi 2.0 u   10 th 0.015: numeric 1.659%  3-arc 1.659%  law(pre-reg) 1.104% (ratio 1.503)  law(revised) 1.754% (ratio 0.946)
+F2 [fresh] Pi 4.5 u    3 th 0.015: numeric 3.771%  3-arc 3.771%  law(pre-reg) 2.838% (ratio 1.329)  law(revised) 3.974% (ratio 0.949)
+F2 [fresh] Pi 4.5 u   10 th 0.015: numeric 4.468%  3-arc 4.468%  law(pre-reg) 3.436% (ratio 1.300)  law(revised) 4.746% (ratio 0.941)
+F2 [fresh] Pi 8.0 u    3 th 0.015: numeric 7.487%  3-arc 7.487%  law(pre-reg) 6.268% (ratio 1.194)  law(revised) 7.990% (ratio 0.937)
+F2 [fresh] Pi 8.0 u   10 th 0.015: numeric 8.792%  3-arc 8.792%  law(pre-reg) 7.534% (ratio 1.167)  law(revised) 9.487% (ratio 0.927)
+F3 Pi  1.0 u    3: theta* 0.274  G_max 4.18% (numeric 4.18%)  no-burst G at theta* 1.71%
+/usr/local/lib/python3.13/site-packages/scipy/optimize/_optimize.py:2357: RuntimeWarning: invalid value encountered in scalar multiply
+  q = (xf - fulc) * (fx - fnfc)
+F3 Pi  1.0 u   10: theta* 0.075  G_max 2.98% (numeric 2.98%)  no-burst G at theta* 1.68%
+F3 Pi  3.0 u    3: theta* 0.274  G_max 16.40% (numeric 16.40%)  no-burst G at theta* 9.26%
+F3 Pi  3.0 u   10: theta* 0.199  G_max 11.58% (numeric 17.98%)  no-burst G at theta* 11.58%
+F3 Pi  6.0 u    3: theta* 0.379  G_max 39.44% (numeric 39.44%)  no-burst G at theta* 26.43%
+F3 Pi  6.0 u   10: theta* 0.274  G_max 32.80% (numeric 43.45%)  no-burst G at theta* 32.80%
+F3 Pi 10.0 u    3: theta* 0.379  G_max 65.28% (numeric 65.28%)  no-burst G at theta* 53.11%
+F3 Pi 10.0 u   10: theta* 0.379  G_max 59.80% (numeric 70.53%)  no-burst G at theta* 59.80%
+F4 Otaniemi: E8 slope 0.702; kappa (no burst) u 2.0: 0.897, u 3.0: 1.092, u 4.6: 1.214, u 10.0: 1.328, u inf: 1.419; kappa2 u 2.0: 1.362, u 3.0: 1.637, u 4.6: 1.806, u 10.0: 1.963, u inf: 2.087
+F1 (as registered) FAIL
+F2 pre-registered law FAIL | revised law on fresh Pi PASS
+F3 PASS

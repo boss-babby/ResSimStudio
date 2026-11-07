@@ -48,6 +48,7 @@ public:
     double bgS(double p) const { return bg(AD3(p)).v; }
 
     bool live() const { return live_; }
+    int gasPaddingRows() const { return gasPadRows_; }   // C47: OPM low-pressure gas-table padding rows inserted (0 = none)
     bool vap() const { return vap_; }
     const DensitySC& rhoSC() const { return rho_; }
     double gasFactor() const { return gasFactor_; }
@@ -65,6 +66,7 @@ private:
     Table1D rvOfP_;
     Table1D deadB_, deadBMu_;            // dead oil: 1/B and 1/(B mu) vs p
     Table1D gasB_, gasBMu_;              // dry gas
+    int gasPadRows_ = 0;                 // C47: rows of the OPM low-pressure gas-table padding (0 = none)
     // live oil
     std::vector<double> rs_, pb_, bSat_, bmuSat_;
     std::vector<Table1D> uB_, uBMu_;     // per saturated node: ratio vs (p - pb)
@@ -106,7 +108,16 @@ private:
     AD3 stone(const AD3& sw, const AD3& sg, const AD3& krow, const AD3& krog, const AD3& krw, const AD3& krg,
               double krocw, double swco) const;
     bool water_ = true, gas_ = true;
+    bool threePt_ = false;          // SCALECRS: three-point kr scaling
     EndPoints ep_;
+public:
+    // oil relative permeabilities of the two-phase systems as functions of the oil saturation (scaled)
+    AD3 krowAtSo(const AD3& so, const EndPoints* e) const;
+    AD3 krogAtSo(const AD3& so, const EndPoints* e) const;
+    // three-phase oil kr from given two-phase values (ECLIPSE default / Stone), used with hysteresis
+    AD3 kroCombine(const AD3& sw, const AD3& sg, const AD3& krow, const AD3& krog, const EndPoints* e) const;
+    bool threePoint() const { return threePt_; }
+    int kroModel() const { return kroModel_; }
 };
 
 } // namespace ressim

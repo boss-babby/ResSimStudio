@@ -132,12 +132,14 @@ void spmvRect(const std::vector<int>& rp, const std::vector<int>& ci, const std:
 }  // namespace
 
 // ======================================================================== AMG setup
-void AMG::setup(const CSR& A0) {
+void AMG::setup(const CSR& A0) { setup(CSR(A0)); }
+
+void AMG::setup(CSR&& A0) {
     lv_.clear();
     lv_.emplace_back();
-    lv_[0].A = A0;
+    lv_[0].A = std::move(A0);
     lv_[0].A.finalizeDiag();
-    for (int i = 0; i < lv_[0].A.n; ++i) if (lv_[0].A.diag[i] < 0) { lv_[0].A = toCSR(fromCSR(A0)); break; }
+    for (int i = 0; i < lv_[0].A.n; ++i) if (lv_[0].A.diag[i] < 0) { CSR t = toCSR(fromCSR(lv_[0].A)); lv_[0].A = std::move(t); break; }
     for (int i = 0; i < lv_[0].A.n; ++i) if (std::fabs(lv_[0].A.val[lv_[0].A.diag[i]]) < 1e-300) lv_[0].A.val[lv_[0].A.diag[i]] = 1.0;
 
     while (true) {
@@ -246,6 +248,29 @@ void AMG::setup(const CSR& A0) {
         lv_.push_back(std::move(next));
     }
     for (auto& L : lv_) { L.x.assign(L.A.n, 0.0); L.b.assign(L.A.n, 0.0); L.r.assign(L.A.n, 0.0); }
+    factorCoarsest();
+}
+
+// New values on the same sparsity pattern (next Newton iteration / time step): keep the aggregates and
+// transfer operators, recompute the Galerkin coarse operators and the coarsest LU. Unsmoothed aggregation
+// transfer operators depend only on the aggregates, so this is exact apart from the (older) aggregation.
+bool AMG::refresh(const CSR& A0) {
+    if (lv_.empty() || A0.n != lv_[0].A.n || A0.col.size() != lv_[0].A.col.size() || A0.col != lv_[0].A.col) return false;
+    lv_[0].A.val = A0.val;
+    for (int i = 0; i < lv_[0].A.n; ++i) if (std::fabs(lv_[0].A.val[lv_[0].A.diag[i]]) < 1e-300) lv_[0].A.val[lv_[0].A.diag[i]] = 1.0;
+    for (size_t l = 0; l + 1 < lv_.size(); ++l) {
+        const Level& L = lv_[l];
+        Sp P; P.nr = L.A.n; P.nc = L.nc; P.rp = L.pRow; P.ci = L.pCol; P.v = L.pVal;
+        Sp R; R.nr = L.nc; R.nc = L.A.n; R.rp = L.rRow; R.ci = L.rCol; R.v = L.rVal;
+        CSR Ac = toCSR(multiply(R, multiply(fromCSR(L.A), P)));
+        if (Ac.col != lv_[l + 1].A.col) return false;
+        lv_[l + 1].A.val = Ac.val;
+    }
+    factorCoarsest();
+    return true;
+}
+
+void AMG::factorCoarsest() {
     // ---- dense LU of the coarsest level (if small enough)
     const CSR& C = lv_.back().A;
     lu_.clear(); piv_.clear();
@@ -293,29 +318,14 @@ void AMG::cycle(int l) const {
         return;
     }
     std::fill(L.x.begin(), L.x.end(), 0.0);
-    for (int s = 0; s < sweeps; ++s) gaussSeidel(L.A, L.b.data(), L.x.data(), true);
+    gaussSeidel(L.A, L.b.data(), L.x.data(), true);
     L.A.spmv(L.x.data(), L.r.data());
     for (int i = 0; i < n; ++i) L.r[i] = L.b[i] - L.r[i];
     const Level& C = lv_[l + 1];
     spmvRect(L.rRow, L.rCol, L.rVal, L.nc, L.r.data(), C.b.data(), false);
     cycle(l + 1);
-    if (overCorrect) {
-        // e = P x_c; x += alpha e with alpha minimising |r - alpha A e| (plain aggregation under-corrects)
-        L.e.resize(size_t(n));
-        L.ae.resize(size_t(n));
-        spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.e.data(), false);
-        L.A.spmv(L.e.data(), L.ae.data());
-        double num = 0, den = 0;
-        for (int i = 0; i < n; ++i) {
-            num += L.ae[size_t(i)] * L.r[size_t(i)];
-            den += L.ae[size_t(i)] * L.ae[size_t(i)];
-        }
-        double alpha = den > 0 ? num / den : 1.0;
-        if (!std::isfinite(alpha)) alpha = 1.0;
-        alpha = std::min(3.0, std::max(0.3, alpha));
-        for (int i = 0; i < n; ++i) L.x[size_t(i)] += alpha * L.e[size_t(i)];
-    } else spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.x.data(), true);
-    for (int s = 0; s < sweeps; ++s) gaussSeidel(L.A, L.b.data(), L.x.data(), false);
+    spmvRect(L.pRow, L.pCol, L.pVal, n, C.x.data(), L.x.data(), true);
+    gaussSeidel(L.A, L.b.data(), L.x.data(), false);
 }
 
 void AMG::apply(const double* r, double* z) const {
@@ -327,22 +337,49 @@ void AMG::apply(const double* r, double* z) const {
 }
 
 // ======================================================================== CPR
+// condition estimate of a small dense block: ||D||_1 * ||D^-1||_1 (Gauss-Jordan; huge when singular)
+static double blockCondition(const double D[3][3], int n) {
+    double M[3][6] = {{0}};
+    double n1 = 0;
+    for (int j = 0; j < n; ++j) { double c = 0; for (int i = 0; i < n; ++i) c += std::fabs(D[i][j]); n1 = std::max(n1, c); }
+    for (int i = 0; i < n; ++i) { for (int j = 0; j < n; ++j) M[i][j] = D[i][j]; M[i][n + i] = 1.0; }
+    for (int k = 0; k < n; ++k) {
+        int pr = k;
+        for (int i = k + 1; i < n; ++i) if (std::fabs(M[i][k]) > std::fabs(M[pr][k])) pr = i;
+        if (std::fabs(M[pr][k]) <= 1e-300 * std::max(1.0, n1)) return 1e300;
+        if (pr != k) for (int j = 0; j < 2 * n; ++j) std::swap(M[k][j], M[pr][j]);
+        const double piv = M[k][k];
+        for (int j = 0; j < 2 * n; ++j) M[k][j] /= piv;
+        for (int i = 0; i < n; ++i) if (i != k) { const double f = M[i][k]; for (int j = 0; j < 2 * n; ++j) M[i][j] -= f * M[k][j]; }
+    }
+    double ni = 0;
+    for (int j = 0; j < n; ++j) { double c = 0; for (int i = 0; i < n; ++i) c += std::fabs(M[i][n + j]); ni = std::max(ni, c); }
+    return n1 * ni;
+}
+
 void CPR::setup(const CSR& A, int nCells, int nv, int nWells, const double* accBlocks) {
     A_ = &A; na_ = nCells; nv_ = nv; nw_ = nWells;
     const int nc = na_ * nv_;
     // quasi-IMPES weights: D^T w = e_p for the diagonal block of each cell
     w_.assign(size_t(nc), 1.0);
+    nFallback_ = 0;
     for (int a = 0; a < na_; ++a) {
         double D[3][3] = {{0}};
-        if (accBlocks) {
-            const double* B = accBlocks + size_t(a) * nv_ * nv_;
-            for (int e = 0; e < nv_; ++e) for (int v = 0; v < nv_; ++v) D[e][v] = B[e * nv_ + v];
-        } else
+        auto jacBlock = [&] {
             for (int e = 0; e < nv_; ++e) {
                 const int row = a * nv_ + e;
                 const int p0 = A.diag[row] - e;              // position of column a*nv in this row
                 for (int v = 0; v < nv_; ++v) D[e][v] = A.val[p0 + v];
             }
+        };
+        if (accBlocks) {
+            const double* B = accBlocks + size_t(a) * nv_ * nv_;
+            for (int e = 0; e < nv_; ++e) for (int v = 0; v < nv_; ++v) D[e][v] = B[e * nv_ + v];
+            // true-IMPES needs a well-conditioned accumulation block. In cells where a phase is absent (gas cap
+            // without oil, water-only cells) it is close to singular and its weights wreck the pressure system:
+            // use the quasi-IMPES (Jacobian diagonal block) weights there.
+            if (nv_ > 1 && blockCondition(D, nv_) > 1e10) { jacBlock(); ++nFallback_; }
+        } else jacBlock();
         // solve D^T w = e0 (Gaussian elimination with pivoting on the transposed block)
         double M[3][4] = {{0}};
         for (int i = 0; i < nv_; ++i) { for (int j = 0; j < nv_; ++j) M[i][j] = D[j][i]; M[i][nv_] = (i == 0) ? 1.0 : 0.0; }
@@ -363,6 +400,10 @@ void CPR::setup(const CSR& A, int nCells, int nv, int nWells, const double* accB
             double s = 0; for (int e = 0; e < nv_; ++e) s += D[e][0];
             for (int e = 0; e < nv_; ++e) w_[size_t(a) * nv_ + e] = std::fabs(s) > 1e-300 ? 1.0 / s : 1.0;
         }
+        // normalise: the pressure row keeps the scale of the largest weight (as OPM does); scaling a row of the
+        // pressure system does not change its solution but keeps AMG strength measures comparable across cells
+        double wm = 0; for (int e = 0; e < nv_; ++e) wm = std::max(wm, std::fabs(w_[size_t(a) * nv_ + e]));
+        if (!(wm > 0) || !std::isfinite(wm)) { for (int e = 0; e < nv_; ++e) w_[size_t(a) * nv_ + e] = 1.0; }
     }
     // pressure matrix (cells + wells)
     const int np = na_ + nw_;

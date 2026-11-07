@@ -1,0 +1,98 @@
+-- FAULT_SLIP (C26): FAULT_INJECTION plus quasi-static fault slip by boundary elements (FAULTSLIP):
+--   faces at the Coulomb limit slip, load their neighbours, slip weakening dMu 0.1 gives cascades;
+--   see Results > Faults & seismicity > Time series (Fault slip, Seismic moment) and the fault face map.
+-- C24 example: injection next to a critically stressed fault - fault mechanics and induced seismicity IN the run.
+-- Strike-slip stress state (Sv 0.24 bar/m, Shmin 0.65 Sv, SHmax 1.10 Sv at 60 deg from x): the vertical fault F1
+-- (x-faces between columns 15 and 16, all layers) lies at 30 deg to SHmax and starts ~6 bar below Coulomb failure.
+-- A water injector 2 cells west of the fault raises the pressure; the run computes per fault face: Coulomb stress,
+-- slip tendency, Dieterich seismicity rate and a stochastic event catalogue; reactivated faces become 20x more
+-- transmissive (two-way coupling, FAULTMECH item 9) and a quasi-dynamic rate-and-state trace runs on layer 3 after
+-- the run (FAULTRSF). Results: 3D view (fault faces + events), Results > Faults & seismicity.
+-- OPM Flow / ECLIPSE ignore the '-- RESSIM:' lines (the deck runs there as a plain injection case).
+RUNSPEC
+TITLE
+Injection near a critically stressed fault (C24 fault mechanics + seismicity)
+DIMENS
+ 30 20 5 /
+OIL
+WATER
+METRIC
+TABDIMS
+ 1 1 20 20 /
+WELLDIMS
+ 2 5 1 2 /
+FAULTDIM
+ 1 /
+START
+ 1 JAN 2026 /
+GRID
+DX
+ 3000*50 /
+DY
+ 3000*50 /
+DZ
+ 3000*10 /
+TOPS
+ 600*1975 /
+PORO
+ 3000*0.15 /
+PERMX
+ 3000*50 /
+PERMY
+ 3000*50 /
+PERMZ
+ 3000*5 /
+FAULTS
+ 'F1' 15 15 1 20 1 5 'X' /
+/
+MULTFLT
+ 'F1' 0.05 /
+/
+-- RESSIM: STRESSFIELD 0.24 0.65 1.10 60 0.5 0
+-- RESSIM: FAULTMECH F1 0.6 0 0 100 5 1.0 -1.0 20
+-- RESSIM: FAULTSLIP 20 0.25 0.1 10 25 HALFSPACE
+-- RESSIM: FAULTRSF F1 3 0.010 0.015 1.0
+PROPS
+PVCDO
+ 200 1.02 5e-5 2.0 0 /
+PVTW
+ 200 1.0 4.5e-5 0.4 0 /
+DENSITY
+ 850 1020 1 /
+ROCK
+ 200 5e-5 /
+SWOF
+ 0.20 0.00 1.00 0
+ 0.30 0.02 0.70 0
+ 0.40 0.06 0.45 0
+ 0.50 0.13 0.26 0
+ 0.60 0.22 0.12 0
+ 0.70 0.34 0.04 0
+ 0.80 0.50 0.00 0
+ 1.00 1.00 0.00 0 /
+SOLUTION
+EQUIL
+ 2000 200 2100 0 /
+SCHEDULE
+WELSPECS
+ INJ G 13 10 2000 WATER /
+ PROD G 26 10 2000 OIL /
+/
+COMPDAT
+ INJ 13 10 1 5 OPEN 1* 1* 0.2 /
+ PROD 26 10 1 5 OPEN 1* 1* 0.2 /
+/
+WCONINJE
+ INJ WATER OPEN RATE 800 1* 280 /
+/
+WCONPROD
+ PROD OPEN BHP 5* 150 /
+/
+TSTEP
+ 5*10 9*50 /
+WCONINJE
+ INJ WATER SHUT RATE 0 1* 400 /
+/
+TSTEP
+ 6*60 /
+END

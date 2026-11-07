@@ -1,0 +1,12 @@
+SEED 1
+SUMMARY H11 const 2.35775e+15 | GP-EI best 2.22225e+15 at [1.43 0.59 0.91 1.07] (24 RSF evaluations incl. 12 training) | ES median best (H9b) 2.21503e+15 | ratio 1.003 | vs const 0.943 | RSF 145 s
+VERDICT H11 SUPPORTED (<= 1.05)
+SEED 2
+SUMMARY H11 const 2.35775e+15 | GP-EI best 2.21672e+15 at [1.48 0.56 0.96 1.00] (24 RSF evaluations incl. 12 training) | ES median best (H9b) 2.21503e+15 | ratio 1.001 | vs const 0.940 | RSF 152 s
+VERDICT H11 SUPPORTED (<= 1.05)
+SEED 3
+SUMMARY H11 const 2.35775e+15 | GP-EI best 2.22868e+15 at [1.40 0.65 0.94 1.01] (24 RSF evaluations incl. 12 training) | ES median best (H9b) 2.21503e+15 | ratio 1.006 | vs const 0.945 | RSF 155 s
+VERDICT H11 SUPPORTED (<= 1.05)
+SEED 4
+SUMMARY H11 const 2.35775e+15 | GP-EI best 2.21627e+15 at [1.48 0.69 0.81 1.02] (24 RSF evaluations incl. 12 training) | ES median best (H9b) 2.21503e+15 | ratio 1.001 | vs const 0.940 | RSF 151 s
+VERDICT H11 SUPPORTED (<= 1.05)

@@ -1,5 +1,9 @@
-// Shared graphics context (D3D11 + Direct2D + DirectWrite) owned by main.cpp.
+// Shared graphics context owned by the entry point.
+//   Windows (default)          : D3D11 + Direct2D + DirectWrite (main.cpp)          -> RESSIM_D3D11
+//   Linux / macOS (or -DRESSIM_GL): GLFW window + OpenGL 3.3 core (main_glfw.cpp)   -> RESSIM_GL
 #pragma once
+#if defined(_WIN32) && !defined(RESSIM_GL)
+#define RESSIM_D3D11 1
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -24,6 +28,17 @@ struct Gfx {
     IDWriteFactory* dwrite = nullptr;
     float dpiScale = 1.0f;
 };
-extern Gfx g_gfx;
-
 template <class T> inline void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
+#else
+#ifndef RESSIM_GL
+#define RESSIM_GL 1
+#endif
+struct GLFWwindow;
+struct Gfx {
+    GLFWwindow* window = nullptr;
+    float dpiScale = 1.0f;
+    int glMajor = 3, glMinor = 3;
+    const char* renderer = "";
+};
+#endif
+extern Gfx g_gfx;

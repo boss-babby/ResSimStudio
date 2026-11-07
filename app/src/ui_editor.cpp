@@ -4,13 +4,13 @@
 // record templates, column alignment, INCLUDE navigation, and Apply-to-model / Run.
 // Text editing is provided by ImGuiColorTextEdit (goossens, MIT) in third_party/textedit.
 #include "app.h"
+#include "platform.h"
 #include "widgets.h"
 #include "theme.h"
 #include "gfx.h"
 #include "deck_intel.h"
 #include "TextEditor.h"
 #include "ressim/deck_parser.h"
-#include <windows.h>
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -28,13 +28,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string exeDir() {
-    char buf[MAX_PATH] = {0};
-    GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::string d(buf);
-    const size_t s = d.find_last_of("\\/");
-    return s == std::string::npos ? std::string() : d.substr(0, s + 1);
-}
+std::string exeDir() { return plat::exeDir(); }
 void ensureDocs() {
     static bool tried = false;
     if (tried) return;
@@ -103,6 +97,13 @@ const TextEditor::Language* eclipseLanguage() {
                 if (di::isSectionName(w)) color = C::declaration;
                 else if (knownKeywords().count(w)) color = C::keyword;
                 else color = C::knownIdentifier;
+                // text after a keyword is ignored by ECLIPSE (generator stamps in old decks): show it as a comment
+                // unless the line looks like a data record (contains '/')
+                if (color != C::knownIdentifier && i < end) {
+                    bool slash = false;
+                    for (auto j = i; j < end; ++j) if (*j == '/') { slash = true; break; }
+                    if (!slash) info.lineFlags = 1;
+                }
             } else color = C::identifier;
             return i;
         }
@@ -140,6 +141,7 @@ TextEditor::Palette eclipsePalette() {
     set(TextEditor::Color::lineNumber, IM_COL32(90, 96, 110, 255));
     set(TextEditor::Color::currentLineNumber, IM_COL32(200, 205, 215, 255));
     set(TextEditor::Color::currentLineHighlight, IM_COL32(40, 44, 54, 120));
+    set(TextEditor::Color::cursor, IM_COL32(205, 225, 255, 255));   // bright caret
     return p;
 }
 
@@ -510,14 +512,14 @@ bool deckFormRecords(di::Form& F, const std::string& units) {
         if (ImGui::SmallButton("x")) del = int(r);
         const int rows = F.table ? (int(rec.size()) + cols - 1) / cols : 1;
         const float tableH = std::min(fs * 22.0f, (rows + 1) * ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ScrollbarSize + 4.0f);
-        if (ImGui::BeginTable("##rec", cols + (F.table ? 1 : 0), ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY, ImVec2(0, tableH))) {
+        if (ui::beginTable("##rec", cols + (F.table ? 1 : 0), ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY, ImVec2(0, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
             for (int c = 0; c < cols; ++c) {
                 const di::Param* p = F.table ? (F.info && !F.info->params.empty() ? &F.info->params[size_t(c) % F.info->params.size()] : nullptr)
                                              : (c < int(ps.size()) ? ps[size_t(c)] : nullptr);
-                ImGui::TableSetupColumn(p ? p->name.c_str() : "?", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+                ui::tableColumn(p ? p->name.c_str() : "?", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
             }
-            if (F.table) ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, fs * 1.5f);
+            if (F.table) ui::tableColumn("", ImGuiTableColumnFlags_WidthFixed, fs * 1.5f);
             ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
             for (int c = 0; c < cols; ++c) {
                 ImGui::TableSetColumnIndex(c);
@@ -561,7 +563,7 @@ bool deckFormRecords(di::Form& F, const std::string& units) {
                     ImGui::PopID();
                 }
             }
-            ImGui::EndTable();
+            ui::endTable();
             if (delRow >= 0) {
                 const size_t a = size_t(delRow * cols), e = std::min(rec.size(), a + size_t(cols));
                 rec.erase(rec.begin() + long(a), rec.begin() + long(e));
@@ -589,36 +591,36 @@ void App::deckEditorWorkspace() {
     ImGui::PopStyleVar(2);
     const float fs = ImGui::GetFontSize();
     EdDoc* d = S.doc();
-    auto tip = [](const char* t) { if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", t); };
+    auto tip = [](const char* t) { if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", TR(t)); };
 
     // ---------------- command bar
-    if (ImGui::Button(ICON_FILE_PLUS " New")) { newDoc(S, std::string(), kSkeleton, &S.ac); d = S.doc(); }
+    if (ImGui::Button(TRL(ICON_FILE_PLUS " New"))) { newDoc(S, std::string(), kSkeleton, &S.ac); d = S.doc(); }
     tip("New deck from a skeleton (Ctrl+N)");
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FOLDER_OPEN " Open...")) {
+    if (ImGui::Button(TRL(ICON_FOLDER_OPEN " Open..."))) {
         std::string p;
         if (fileDialog(false, "ECLIPSE deck / include\0*.DATA;*.data;*.INC;*.inc;*.GRDECL;*.grdecl;*.SCH;*.sch\0All files (*.*)\0*.*\0", "DATA", p)) edOpenFile(p);
     }
     tip("Open a deck or include file (Ctrl+O)");
     ImGui::SameLine();
-    if (ImGui::Button(ICON_BOX " Model deck")) edOpenModelDeck();
+    if (ImGui::Button(TRL(ICON_BOX " Model deck"))) edOpenModelDeck();
     tip("Write the current model as an ECLIPSE deck (large arrays as INCLUDE files) and open it");
     ImGui::SameLine();
     ImGui::BeginDisabled(!d);
-    if (ImGui::Button(ICON_SAVE " Save")) edSave(S.active, false);
+    if (ImGui::Button(TRL(ICON_SAVE " Save"))) edSave(S.active, false);
     tip("Save (Ctrl+S)");
     ImGui::SameLine();
-    if (ImGui::Button(ICON_SAVE " Save as...")) edSave(S.active, true);
+    if (ImGui::Button(TRL(ICON_SAVE " Save as..."))) edSave(S.active, true);
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
-    bool doCheck = ImGui::Button(ICON_LIST_CHECKS " Check");
+    bool doCheck = ImGui::Button(TRL(ICON_LIST_CHECKS " Check"));
     tip("Full check with the deck parser (F7): record structure, INCLUDE files, keyword support");
     ImGui::SameLine();
-    bool doAlign = ImGui::Button(ICON_TABLE " Align");
+    bool doAlign = ImGui::Button(TRL(ICON_TABLE " Align"));
     tip("Align the columns of the keyword at the cursor and add column headers (Ctrl+Shift+A)");
     ImGui::SameLine();
-    bool doTemplate = ImGui::Button(ICON_WAND_SPARKLES " Template");
+    bool doTemplate = ImGui::Button(TRL(ICON_WAND_SPARKLES " Template"));
     tip("Insert a record template for the keyword on the cursor line (Ctrl+Shift+T)");
     ImGui::SameLine();
     ImGui::TextDisabled("|");
@@ -626,19 +628,19 @@ void App::deckEditorWorkspace() {
     bool doApply = ui::accentButton(ICON_UPLOAD " Apply to model");
     tip("Save and import this deck into the model (Ctrl+Enter). The Model and Results workspaces use it.");
     ImGui::SameLine();
-    bool doRun = ImGui::Button(ICON_PLAY " Run");
+    bool doRun = ImGui::Button(TRL(ICON_PLAY " Run"));
     tip("Apply to model and run it with the selected engine (F5)");
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button(ICON_EYE " View")) ImGui::OpenPopup("edview");
+    if (ImGui::Button(TRL(ICON_EYE " View"))) ImGui::OpenPopup("edview");
     if (ImGui::BeginPopup("edview")) {
-        ImGui::Checkbox("Outline / keywords panel", &S.showLeft);
-        ImGui::Checkbox("Documentation / form panel", &S.showRight);
-        ImGui::Checkbox("Problems panel", &S.showProblems);
+        ImGui::Checkbox(TRL("Outline / keywords panel"), &S.showLeft);
+        ImGui::Checkbox(TRL("Documentation / form panel"), &S.showRight);
+        ImGui::Checkbox(TRL("Problems panel"), &S.showProblems);
         ImGui::Separator();
-        ImGui::Checkbox("Insert record template after keyword completion", &S.autoTemplate);
-        if (ImGui::Checkbox("Mini map", &S.minimap)) for (auto& x : S.docs) x->ed.SetShowMiniMapEnabled(S.minimap);
-        if (ImGui::Checkbox("Show whitespace", &S.whitespace)) for (auto& x : S.docs) x->ed.SetShowWhitespacesEnabled(S.whitespace);
+        ImGui::Checkbox(TRL("Insert record template after keyword completion"), &S.autoTemplate);
+        if (ImGui::Checkbox(TRL("Mini map"), &S.minimap)) for (auto& x : S.docs) x->ed.SetShowMiniMapEnabled(S.minimap);
+        if (ImGui::Checkbox(TRL("Show whitespace"), &S.whitespace)) for (auto& x : S.docs) x->ed.SetShowWhitespacesEnabled(S.whitespace);
         ImGui::SetNextItemWidth(fs * 8);
         ImGui::SliderFloat("Text size", &S.fontScale, 0.7f, 2.0f, "%.2fx");
         ImGui::EndPopup();
@@ -674,7 +676,7 @@ void App::deckEditorWorkspace() {
             bool open = true;
             ImGuiTabItemFlags fl = (x.modified() ? ImGuiTabItemFlags_UnsavedDocument : 0) | (S.wantActive == int(i) ? ImGuiTabItemFlags_SetSelected : 0);
             const std::string label = x.title + "###doc" + std::to_string(reinterpret_cast<uintptr_t>(&x));
-            if (ImGui::BeginTabItem(label.c_str(), &open, fl)) { S.active = int(i); ImGui::EndTabItem(); }
+            if (ui::tabItem(label.c_str(), &open, fl)) { S.active = int(i); ImGui::EndTabItem(); }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", x.path.empty() ? "not saved" : x.path.c_str());
             if (!open) S.closeAsk = int(i);
         }
@@ -684,7 +686,7 @@ void App::deckEditorWorkspace() {
     if (S.closeAsk >= 0 && S.closeAsk < int(S.docs.size())) {
         EdDoc& x = *S.docs[size_t(S.closeAsk)];
         int r = IDNO;
-        if (x.modified()) r = MessageBoxA(g_gfx.hwnd, ("Save changes to " + x.title + "?").c_str(), "Deck Editor", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (x.modified()) r = plat::msgBox(("Save changes to " + x.title + "?").c_str(), "Deck Editor", MB_YESNOCANCEL | MB_ICONQUESTION);
         if (r == IDYES && !edSave(S.closeAsk, false)) r = IDCANCEL;
         if (r != IDCANCEL) {
             S.docs.erase(S.docs.begin() + S.closeAsk);
@@ -699,19 +701,19 @@ void App::deckEditorWorkspace() {
         ImGui::Dummy(ImVec2(0, fs * 3));
         ImGui::Indent(fs * 2);
         if (g_fonts.title) ImGui::PushFont(g_fonts.title, 0.0f);
-        ImGui::TextUnformatted("Deck Editor");
+        ImGui::TextUnformatted(TR("Deck Editor"));
         if (g_fonts.title) ImGui::PopFont();
-        ImGui::TextDisabled("Intelligent ECLIPSE / OPM Flow deck editing: keyword and value completion, record templates, hover");
-        ImGui::TextDisabled("documentation, live checks, keyword forms, INCLUDE navigation, and Apply / Run.");
+        ImGui::TextDisabled("%s", TR("Intelligent ECLIPSE / OPM Flow deck editing: keyword and value completion, record templates, hover"));
+        ImGui::TextDisabled("%s", TR("documentation, live checks, keyword forms, INCLUDE navigation, and Apply / Run."));
         ImGui::Dummy(ImVec2(0, fs));
         if (ui::accentButton("Open the current model as a deck")) edOpenModelDeck();
         ImGui::SameLine();
-        if (ImGui::Button("Open a deck file...")) {
+        if (ImGui::Button(TRL("Open a deck file..."))) {
             std::string p;
             if (fileDialog(false, "ECLIPSE deck / include\0*.DATA;*.data;*.INC;*.inc;*.GRDECL;*.grdecl\0All files (*.*)\0*.*\0", "DATA", p)) edOpenFile(p);
         }
         ImGui::SameLine();
-        if (ImGui::Button("New deck")) newDoc(S, std::string(), kSkeleton, &S.ac);
+        if (ImGui::Button(TRL("New deck"))) newDoc(S, std::string(), kSkeleton, &S.ac);
         ImGui::Unindent(fs * 2);
         ImGui::End();
         return;
@@ -782,7 +784,7 @@ void App::deckEditorWorkspace() {
     if (S.showLeft) {
         ImGui::BeginChild("##edleft", ImVec2(leftW, mainH), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
         if (ImGui::BeginTabBar("##edlefttabs")) {
-            if (ImGui::BeginTabItem("Outline")) {
+            if (ui::tabItem("Outline")) {
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 ImGui::InputTextWithHint("##of", "filter keywords", S.outlineFilter, sizeof(S.outlineFilter));
                 ImGui::BeginChild("##outline");
@@ -817,7 +819,7 @@ void App::deckEditorWorkspace() {
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Keywords")) {
+            if (ui::tabItem("Keywords")) {
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 ImGui::InputTextWithHint("##kf", "search name or summary", S.kwFilter, sizeof(S.kwFilter));
                 const std::string section = ctx.section;
@@ -1012,7 +1014,7 @@ void App::deckEditorWorkspace() {
         ImGui::BeginChild("##edright", ImVec2(0, mainH), ImGuiChildFlags_Borders);
         if (ImGui::BeginTabBar("##edrighttabs")) {
             const int wantTab = S.wantRightTab; S.wantRightTab = -1;
-            if (ImGui::BeginTabItem("Documentation", nullptr, wantTab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+            if (ui::tabItem("Documentation", nullptr, wantTab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
                 ImGui::BeginChild("##docs");
                 if (!ctx.info) {
                     if (ctx.keyword.empty()) ui::hint("Move the cursor into a keyword to see its documentation.");
@@ -1034,11 +1036,11 @@ void App::deckEditorWorkspace() {
                     if (!ctx.onKeywordLine && ctx.itemIndex >= 0 && !ctx.arrayKeyword)
                         ImGui::TextColored(col4(Pal::Accent), "Cursor: record %d, item %d%s%s", ctx.record + 1, ctx.itemIndex + 1, ctx.param ? " - " : "",
                                            ctx.param ? ctx.param->name.c_str() : "");
-                    if (!k.params.empty() && ImGui::BeginTable("##params", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
-                        ImGui::TableSetupColumn("#");
-                        ImGui::TableSetupColumn("Item");
-                        ImGui::TableSetupColumn("Units");
-                        ImGui::TableSetupColumn("Default", ImGuiTableColumnFlags_WidthStretch);
+                    if (!k.params.empty() && ui::beginTable("##params", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+                        ui::tableColumn("#");
+                        ui::tableColumn("Item");
+                        ui::tableColumn("Units");
+                        ui::tableColumn("Default", ImGuiTableColumnFlags_WidthStretch);
                         ImGui::TableHeadersRow();
                         int lastRec = -1;
                         for (const auto& p : k.params) {
@@ -1068,7 +1070,7 @@ void App::deckEditorWorkspace() {
                             ImGui::TableSetColumnIndex(3);
                             ImGui::TextUnformatted(p.def.c_str());
                         }
-                        ImGui::EndTable();
+                        ui::endTable();
                     }
                     if (ctx.param) {
                         ImGui::Separator();
@@ -1083,7 +1085,7 @@ void App::deckEditorWorkspace() {
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Form", nullptr, wantTab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+            if (ui::tabItem("Form", nullptr, wantTab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
                 // schema-driven form of the keyword at the cursor
                 const BlockRange b = blockAt(*d, cline);
                 if (b.kwLine < 0) ui::hint("Move the cursor into a keyword to edit its records in a form.");
@@ -1135,10 +1137,10 @@ void App::deckEditorWorkspace() {
         ImGui::SameLine();
         ImGui::TextDisabled("%d error(s), %d warning(s), %zu hint(s)   |   %d lines, %zu keywords   |   F7: full check with the parser", ne, nw,
                             nd - size_t(ne + nw), int(d->lines.size()), d->outline.items.size());
-        if (ImGui::BeginTable("##probs", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
-            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, fs * 1.2f);
-            ImGui::TableSetupColumn("Line", ImGuiTableColumnFlags_WidthFixed, fs * 3.5f);
-            ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch);
+        if (ui::beginTable("##probs", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, ImVec2(0, -FLT_MIN))) {
+            ui::tableColumn("", ImGuiTableColumnFlags_WidthFixed, fs * 1.2f);
+            ui::tableColumn("Line", ImGuiTableColumnFlags_WidthFixed, fs * 3.5f);
+            ui::tableColumn("Message", ImGuiTableColumnFlags_WidthStretch);
             int idx = 0;
             for (const auto* l : {&d->parserDiags, &d->diags}) {
                 for (const auto& g : *l) {
@@ -1153,7 +1155,7 @@ void App::deckEditorWorkspace() {
                     ImGui::PopID();
                 }
             }
-            ImGui::EndTable();
+            ui::endTable();
         }
         ImGui::EndChild();
     }
@@ -1171,7 +1173,7 @@ bool App::edConfirmClose() {
     for (size_t i = 0; i < ed_->docs.size(); ++i) {
         EdDoc& x = *ed_->docs[i];
         if (!x.modified()) continue;
-        const int r = MessageBoxA(g_gfx.hwnd, ("Save changes to " + x.title + " (Deck Editor)?").c_str(), "ResSim Studio", MB_YESNOCANCEL | MB_ICONQUESTION);
+        const int r = plat::msgBox(("Save changes to " + x.title + " (Deck Editor)?").c_str(), "ResSim Studio", MB_YESNOCANCEL | MB_ICONQUESTION);
         if (r == IDCANCEL) return false;
         if (r == IDYES && !edSave(int(i), false)) return false;
     }

@@ -1,7 +1,12 @@
 // Multi-run studies: batch runner, sensitivity analysis and history matching.
 #include "ressim/study.h"
+#include "ressim/geostat.h"
 #include "ressim/ecl.h"
+#include "ressim/coupled_bo.h"
+#include "ressim/coupled_deck.h"
 #include <thread>
+#include <chrono>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <cmath>
@@ -52,12 +57,15 @@ const char* toString(ParamKind k) {
         case ParamKind::PcMult: return "Capillary pressure multiplier";
         case ParamKind::InjRate: return "Injection rate multiplier";
         case ParamKind::ProdRate: return "Production rate multiplier";
+        case ParamKind::GeoRange: return "Geomodel variogram range multiplier";
+        case ParamKind::GeoSeed: return "Geomodel realisation (seed)";
     }
     return "?";
 }
 bool paramIsMultiplier(ParamKind k) {
     return !(k == ParamKind::OWC || k == ParamKind::DatumPressure || k == ParamKind::WellSkin || k == ParamKind::FaultMult ||
-             k == ParamKind::KrwExp || k == ParamKind::KroExp || k == ParamKind::GOC || k == ParamKind::KrgExp || k == ParamKind::KrogExp);
+             k == ParamKind::KrwExp || k == ParamKind::KroExp || k == ParamKind::GOC || k == ParamKind::KrgExp || k == ParamKind::KrogExp ||
+             k == ParamKind::GeoSeed);
 }
 bool paramUsesBox(ParamKind k) {
     return k == ParamKind::PermXY || k == ParamKind::PermZ || k == ParamKind::Poro || k == ParamKind::Ntg || k == ParamKind::MultZ;
@@ -91,6 +99,13 @@ std::string paramLabel(const StudyParam& p, const Case& c) {
         case ParamKind::PcMult: o << "Pcow"; break;
         case ParamKind::InjRate: o << "q_inj " << (p.target >= 0 && p.target < int(c.wells.size()) ? c.wells[p.target].name : "all"); break;
         case ParamKind::ProdRate: o << "q_prod " << (p.target >= 0 && p.target < int(c.wells.size()) ? c.wells[p.target].name : "all"); break;
+        case ParamKind::GeoRange: case ParamKind::GeoSeed: {
+            static const char* kP[] = {"PORO", "PERMX", "NTG", "FACIES"};
+            o << (p.kind == ParamKind::GeoRange ? "range " : "seed ");
+            if (p.target >= 0 && p.target < int(c.propModels.size())) o << kP[std::clamp(c.propModels[size_t(p.target)].property, 0, 3)] << " #" << p.target + 1;
+            else o << "all models";
+            break;
+        }
     }
     if (paramUsesBox(p.kind)) {
         const bool full = p.i1 < 0 && p.j1 < 0 && p.i2 < 0 && p.j2 < 0;
@@ -116,6 +131,28 @@ double paramFromUnit(const StudyParam& p, double u) {
 
 Case applyParams(const Case& base, const std::vector<StudyParam>& params, const std::vector<double>& values) {
     Case c = base;
+    {   // C40 geomodel parameters first: re-simulate the property models, then the multipliers act on the new fields
+        std::vector<PropModelInput> pm = c.propModels;
+        std::vector<char> redo(pm.size(), 0);
+        for (size_t i = 0; i < params.size(); ++i) {
+            const StudyParam& p = params[i];
+            if (p.kind != ParamKind::GeoRange && p.kind != ParamKind::GeoSeed) continue;
+            const double v = (p.active && i < values.size()) ? values[i] : p.base;
+            for (size_t m = 0; m < pm.size(); ++m) {
+                if (p.target >= 0 && size_t(p.target) != m) continue;
+                if (p.kind == ParamKind::GeoRange) {
+                    if (v == 1.0) continue;
+                    pm[m].rangeMax *= v; pm[m].rangeMin *= v; pm[m].rangeVert *= v;
+                } else {
+                    const unsigned sd = unsigned(std::max(1L, std::lround(v)));
+                    if (sd == pm[m].seed) continue;
+                    pm[m].seed = sd;
+                }
+                redo[m] = 1;
+            }
+        }
+        for (size_t m = 0; m < pm.size(); ++m) if (redo[m]) geostat::applyPropModel(c, pm[m]);
+    }
     GridInput& g = c.grid;
     bool anyPerm = false;
     for (auto& p : params) if (p.kind == ParamKind::PermXY || p.kind == ParamKind::PermZ) anyPerm = true;
@@ -123,8 +160,10 @@ Case applyParams(const Case& base, const std::vector<StudyParam>& params, const 
     for (size_t i = 0; i < params.size(); ++i) {
         const StudyParam& p = params[i];
         const double v = (p.active && i < values.size()) ? values[i] : p.base;
+        if (p.kind == ParamKind::GeoRange || p.kind == ParamKind::GeoSeed) continue;   // done above
         if (paramIsMultiplier(p.kind) && v == 1.0) continue;
         switch (p.kind) {
+            case ParamKind::GeoRange: case ParamKind::GeoSeed: break;   // C40: applied before the loop
             case ParamKind::PermXY: case ParamKind::PermZ: case ParamKind::Poro: case ParamKind::Ntg: case ParamKind::MultZ: {
                 const size_t ncell = size_t(g.nx) * g.ny * g.nz;
                 if (p.kind == ParamKind::Ntg && g.ntg.size() != ncell) g.ntg.assign(ncell, 1.0);
@@ -198,16 +237,79 @@ Case applyParams(const Case& base, const std::vector<StudyParam>& params, const 
 }
 
 // ======================================================================== runs
+// C28: compositional / CO2STORE and thermal cases in studies (field summary + coupled KPIs; well vectors are not mapped)
+static RunResult runSingleDeckEngine(const Case& c, std::atomic<bool>* cancel) {
+    RunResult r;
+    std::string err;
+    coupledbo::Output co;
+    auto keepGoing = [cancel]() { return !(cancel && cancel->load()); };
+    bool ok = false;
+    std::vector<SummaryPoint>& pts = r.summary;
+    if (c.thermal.enabled) {
+        thermal::DeckModel m;
+        if (!thermal::deckModel(c, m, &err)) { r.error = "thermal model: " + err; return r; }
+        r.wellNames = m.wellNames;
+        std::vector<thermal::Summary> o; thermal::Stats st;
+        ok = coupleddeck::runThermal(c, m, o, co, {}, [&](const thermal::Summary&) { return keepGoing(); }, &err, -1, &st);
+        for (const auto& S : o) {
+            SummaryPoint p; p.time = S.time; p.dt = pts.empty() ? S.time : S.time - pts.back().time;
+            p.fopr = S.fopr; p.fwpr = S.fwpr; p.fgpr = S.fgpr; p.fwir = S.fwir; p.fgir = S.fgir;
+            p.fopt = S.fopt; p.fwpt = S.fwpt; p.fgpt = S.fgpt; p.fwit = S.fwit; p.fgit = S.fgit; p.fpr = S.fpr; p.fprp = S.fpr; p.oip = S.foip;
+            p.fwct = S.fopr + S.fwpr > 0 ? S.fwpr / (S.fopr + S.fwpr) : 0.0; p.fgor = S.fopr > 0 ? S.fgpr / S.fopr : 0.0;
+            for (const auto& W : S.wells) {   // C49: per-well rates and BHP (were dropped: WBHP = 0 in regressions / studies)
+                WellRates w; w.oil = W.oil; w.water = W.water; w.gas = W.gas; w.waterInj = W.winj; w.bhp = W.bhp; w.open = W.open;
+                p.wells.push_back(w);
+            }
+            pts.push_back(p);
+        }
+        r.stats.timesteps = st.steps; r.stats.newton = st.newton; r.stats.linear = st.linear;
+    } else {
+        comp::DeckModel m;
+        if (!comp::deckModel(c, m, &err)) { r.error = "compositional model: " + err; return r; }
+        r.wellNames = m.wellNames;
+        std::vector<comp::CompSummary> o; comp::CompStats st;
+        ok = coupleddeck::runComp(c, m, o, co, {}, [&](const comp::CompSummary&) { return keepGoing(); }, &err, -1, &st);
+        for (const auto& S : o) {
+            SummaryPoint p; p.time = S.time; p.dt = pts.empty() ? S.time : S.time - pts.back().time;
+            p.fopr = S.fopr; p.fwpr = S.fwpr; p.fgpr = S.fgpr; p.fwir = S.fwir; p.fgir = S.fgir;
+            p.fopt = S.fopt; p.fwpt = S.fwpt; p.fgpt = S.fgpt; p.fwit = S.fwit; p.fgit = S.fgit; p.fpr = S.fpr; p.fprp = S.fpr;
+            p.oip = S.foip; p.gip = S.fgip; p.wip = S.fwip;
+            p.fwct = S.fopr + S.fwpr > 0 ? S.fwpr / (S.fopr + S.fwpr) : 0.0;   // C49 (were 0)
+            p.fgor = S.fopr > 0 ? S.fgpr / S.fopr : 0.0;
+            for (const auto& W : S.wells) {   // C49: per-well rates and BHP
+                WellRates w; w.oil = W.oil; w.water = W.water; w.gas = W.gas; w.waterInj = W.winj; w.gasInj = W.ginj; w.bhp = W.bhp; w.open = W.open;
+                p.wells.push_back(w);
+            }
+            pts.push_back(p);
+        }
+        r.stats.timesteps = st.steps; r.stats.newton = st.newton; r.stats.linear = st.linear;
+    }
+    r.kpi = co.kpi;
+    r.oip0 = pts.empty() ? 0 : pts.front().oip;
+    r.ok = ok && !pts.empty() && keepGoing();
+    if (!r.ok) r.error = !keepGoing() ? "cancelled" : err.empty() ? "run failed" : err;
+    return r;
+}
+
 RunResult runSingle(const Case& c, std::atomic<bool>* cancel) {
+    if (c.thermal.enabled || c.comp.enabled) {
+        try { return runSingleDeckEngine(c, cancel); }
+        catch (const std::exception& e) { RunResult r; r.error = e.what(); return r; }
+    }
     RunResult r;
     try {
         Simulator s;
         s.cancel = cancel;
         s.setup(c);
         s.initialize();
-        while (!s.finished()) {
-            if (!s.runReportStep()) break;
-        }
+        if (coupledbo::needed(c)) {   // C27: studies evaluate the coupled mechanics too (seismicity / uplift responses)
+            coupledbo::Output co;
+            coupledbo::run(s, c, co, {}, cancel);
+            r.kpi = co.kpi;
+        } else
+            while (!s.finished()) {
+                if (!s.runReportStep()) break;
+            }
         r.summary = s.summary();
         r.stats = s.stats();
         r.oip0 = r.summary.empty() ? 0 : r.summary.front().oip;
@@ -217,11 +319,24 @@ RunResult runSingle(const Case& c, std::atomic<bool>* cancel) {
     return r;
 }
 
+namespace { BatchRunner g_batchRunner; std::mutex g_batchMx; }
+void setBatchRunner(BatchRunner r) { std::lock_guard<std::mutex> lk(g_batchMx); g_batchRunner = std::move(r); }
+bool hasBatchRunner() { std::lock_guard<std::mutex> lk(g_batchMx); return bool(g_batchRunner); }
+
 std::vector<RunResult> runBatch(const std::vector<Case>& cases, int workers, std::atomic<bool>* cancel,
                                 const std::function<void(int, int)>& progress) {
     const int n = int(cases.size());
     std::vector<RunResult> out(n);
     if (n == 0) return out;
+    {
+        BatchRunner ext;
+        { std::lock_guard<std::mutex> lk(g_batchMx); ext = g_batchRunner; }
+        if (ext && n > 1) {                           // C16: MPI cluster / external scheduler
+            std::vector<RunResult> r = ext(cases, cancel, progress);
+            if (int(r.size()) == n) return r;
+            // runner failed as a whole (e.g. mpiexec not found): fall through to the local thread pool
+        }
+    }
     int hw = int(std::thread::hardware_concurrency()); if (hw < 1) hw = 1;
     int nw = workers > 0 ? workers : hw;
     nw = std::max(1, std::min(nw, n));
@@ -475,6 +590,11 @@ const char* toString(Response r) {
         case Response::FWCT: return "Final water cut";
         case Response::NPV: return "NPV";
         case Response::Misfit: return "History-match misfit";
+        case Response::SeisEvents: return "Expected induced events (faults)";
+        case Response::MaxMw: return "Largest magnitude Mw (faults)";
+        case Response::MaxDCFS: return "Max Coulomb stress change (faults)";
+        case Response::Uplift: return "Surface uplift [m] (geomechanics)";
+        case Response::MaxFailure: return "Max failure index (geomechanics)";
     }
     return "?";
 }
@@ -501,6 +621,11 @@ double responseValue(const RunResult& r, const Case& c, Response resp, const Eco
             return npv;
         }
         case Response::Misfit: return misfit(r, c, obs, sigma);
+        case Response::SeisEvents: return coupledbo::kpiSum(r.kpi, "_expected_events");
+        case Response::MaxMw: return coupledbo::kpiMax(r.kpi, "_max_mw");
+        case Response::MaxDCFS: return coupledbo::kpiMax(r.kpi, "_max_dcfs");
+        case Response::Uplift: return coupledbo::kpiMax(r.kpi, "surface_uplift_m");
+        case Response::MaxFailure: return coupledbo::kpiMax(r.kpi, "max_failure_index");
     }
     return kNaN;
 }
@@ -611,6 +736,16 @@ TornadoResult runTornado(const Case& base, const std::vector<StudyParam>& params
         b.high = responseValue(rh, cases[2 + 2 * k], resp, eco, obs, sig);
         if (!rl.ok) say(cb, "  low run of " + paramLabel(params[b.param], base) + " failed: " + rl.error);
         if (!rh.ok) say(cb, "  high run of " + paramLabel(params[b.param], base) + " failed: " + rh.error);
+        // C28: a side identical to the base usually means an active constraint (e.g. a rate multiplier on a well that runs on
+        // its BHP / THP limit - FAULT_SLIP: injector at the 280 bar limit, so x1.5 changes nothing) - say so instead of hiding it
+        {
+            const ParamKind pk = params[b.param].kind;
+            const bool rate = pk == ParamKind::InjRate || pk == ParamKind::ProdRate;
+            auto same = [&](double v) { return std::isfinite(v) && std::isfinite(tr.base) && std::fabs(v - tr.base) <= 1e-9 * std::max(1.0, std::fabs(tr.base)); };
+            if (rl.ok && rh.ok && (same(b.low) || same(b.high)))
+                say(cb, "  NOTE: " + paramLabel(params[b.param], base) + (same(b.high) && !same(b.low) ? ": the high side" : same(b.low) && !same(b.high) ? ": the low side" : ": both sides") +
+                        " equal the base" + (rate ? " - the wells are probably on their BHP / THP limit (the rate target is not the active control)" : " - the response is insensitive in that range"));
+        }
         tr.bars.push_back(b);
     }
     std::sort(tr.bars.begin(), tr.bars.end(), [&](const TornadoBar& a, const TornadoBar& b) {
@@ -671,10 +806,328 @@ MonteCarloResult runMonteCarlo(const Case& base, const std::vector<StudyParam>& 
     return mc;
 }
 
+// ======================================================================== analytic gradients (discrete adjoint / forward sensitivities)
+const char* toString(GradientMethod g) {
+    switch (g) {
+        case GradientMethod::FiniteDifference: return "Finite differences";
+        case GradientMethod::Analytic: return "Analytic (forward sensitivities)";
+    }
+    return "?";
+}
+
+namespace {
+// a forward run with adjoint recording at normalised active coordinates u
+struct RecordedRun {
+    std::unique_ptr<Simulator> sim;
+    Case c;
+    RunResult run;
+    std::vector<double> values;
+};
+RecordedRun recordedRun(const Case& base, const std::vector<StudyParam>& params, const std::vector<int>& act,
+                        const std::vector<double>& u, std::atomic<bool>* cancel) {
+    RecordedRun R;
+    R.values = baseValues(params);
+    for (size_t k = 0; k < act.size(); ++k) R.values[size_t(act[k])] = paramFromUnit(params[size_t(act[k])], u[k]);
+    R.c = applyParams(base, params, R.values);
+    try {
+        R.sim.reset(new Simulator);
+        R.sim->cancel = cancel;
+        R.sim->setAdjointRecording(true);
+        R.sim->setup(R.c);
+        R.sim->initialize();
+        while (!R.sim->finished()) if (!R.sim->runReportStep()) break;
+        R.run.summary = R.sim->summary();
+        R.run.stats = R.sim->stats();
+        R.run.oip0 = R.run.summary.empty() ? 0 : R.run.summary.front().oip;
+        R.run.ok = R.sim->finished();
+        if (!R.run.ok) R.run.error = "cancelled";
+    } catch (const std::exception& e) { R.run.ok = false; R.run.error = e.what(); }
+    return R;
+}
+// adjoint (forward = false) or forward-sensitivity evaluation of a recorded run; gradient in normalised coordinates.
+// Observations with zero weight or of unknown wells are constant in the misfit and are left out.
+struct AnalyticOut { bool ok = false; std::string error; std::vector<double> grad; std::vector<std::vector<double>> jac; double replayDev = 0, maxLinRes = 0; };
+AnalyticOut analyticGradient(RecordedRun& R, const Case& base, const std::vector<StudyParam>& params, const std::vector<int>& act,
+                             const std::vector<double>& u, const std::vector<double>& sig, bool forward, double hres) {
+    AnalyticOut out;
+    const auto& obs = base.observations;
+    const int nd = int(obs.size()), n = int(act.size());
+    std::vector<Simulator::AdjObs> ao; std::vector<int> aIdx;
+    for (int i = 0; i < nd; ++i) {
+        if (!(sig[size_t(i)] < 1e29)) continue;
+        Simulator::AdjObs o; o.qty = obs[size_t(i)].qty; o.time = obs[size_t(i)].time; o.value = obs[size_t(i)].value; o.sigma = sig[size_t(i)];
+        if (obsIsWell(o.qty)) { o.well = wellIndex(R.c, obs[size_t(i)].well); if (o.well < 0) continue; }
+        ao.push_back(o); aIdx.push_back(i);
+    }
+    // C11: permeability / porosity / MULTZ box multipliers and well PI multipliers get analytic dR/dtheta from ONE reverse
+    // pass (field gradients); the others use residual differences of perturbed models (cost per parameter)
+    const Grid& grid = R.sim->grid();
+    auto isField = [&](ParamKind k) {
+        if (forward) return false;
+        if (k == ParamKind::WellPI) return true;
+        if (k == ParamKind::Poro) return grid.lgr.empty();
+        return (k == ParamKind::PermXY || k == ParamKind::PermZ || k == ParamKind::MultZ) && grid.fieldDerivOk;
+    };
+    Simulator::AdjFieldReq fr;
+    std::vector<int> repl;   // positions k (in act) using perturbed models
+    for (int k = 0; k < n; ++k) {
+        const ParamKind pk = params[size_t(act[size_t(k)])].kind;
+        if (!isField(pk)) { repl.push_back(k); continue; }
+        if (pk == ParamKind::PermXY || pk == ParamKind::PermZ) fr.perm = true;
+        else if (pk == ParamKind::Poro) fr.poro = true;
+        else if (pk == ParamKind::MultZ) fr.trans = true;
+        else fr.wi = true;
+    }
+    const bool anyField = fr.perm || fr.poro || fr.trans || fr.wi;
+    const int nr = int(repl.size());
+    std::vector<Case> plus(static_cast<size_t>(nr)), minus(static_cast<size_t>(nr));
+    std::vector<Simulator::AdjParam> ap(static_cast<size_t>(nr));
+    for (int kr = 0; kr < nr; ++kr) {
+        const int k = repl[size_t(kr)];
+        std::vector<double> up = u, um = u;
+        up[size_t(k)] = std::min(1.0, u[size_t(k)] + hres); um[size_t(k)] = std::max(0.0, u[size_t(k)] - hres);
+        std::vector<double> vp = R.values, vm = R.values;
+        vp[size_t(act[size_t(k)])] = paramFromUnit(params[size_t(act[size_t(k)])], up[size_t(k)]);
+        vm[size_t(act[size_t(k)])] = paramFromUnit(params[size_t(act[size_t(k)])], um[size_t(k)]);
+        plus[size_t(kr)] = applyParams(base, params, vp); minus[size_t(kr)] = applyParams(base, params, vm);
+        ap[size_t(kr)].plus = &plus[size_t(kr)]; ap[size_t(kr)].minus = &minus[size_t(kr)]; ap[size_t(kr)].h = 0.5 * (up[size_t(k)] - um[size_t(k)]);
+    }
+    const Simulator::AdjResult a = R.sim->adjointGradient(ao, ap, forward, anyField ? &fr : nullptr);
+    if (!a.ok) { out.error = a.error; return out; }
+    out.ok = true; out.replayDev = a.replayDev; out.maxLinRes = a.maxLinRes;
+    out.grad.assign(size_t(n), 0.0);
+    for (int kr = 0; kr < nr; ++kr) out.grad[size_t(repl[size_t(kr)])] = a.grad[size_t(kr)] / std::max(1, nd);   // misfit = F / nd
+    if (anyField)
+        for (int k = 0; k < n; ++k) {
+            const StudyParam& P = params[size_t(act[size_t(k)])];
+            if (!isField(P.kind)) continue;
+            const double v = R.values[size_t(act[size_t(k)])];
+            if (!(v > 0)) continue;
+            // dF / d ln v summed over the parameter's cells / faces / connections
+            double gl = 0;
+            const GridInput& g = R.c.grid;
+            const int i1 = P.i1 < 0 ? 0 : P.i1, i2 = P.i2 < 0 ? g.nx - 1 : std::min(P.i2, g.nx - 1);
+            const int j1 = P.j1 < 0 ? 0 : P.j1, j2 = P.j2 < 0 ? g.ny - 1 : std::min(P.j2, g.ny - 1);
+            const int k1 = P.k1 < 0 ? 0 : P.k1, k2 = P.k2 < 0 ? g.nz - 1 : std::min(P.k2, g.nz - 1);
+            auto inBox = [&](int q) {
+                if (q < 0 || q >= g.nx * g.ny * g.nz) return false;
+                const int ii = q % g.nx, jj = (q / g.nx) % g.ny, kk = q / (g.nx * g.ny);
+                return ii >= i1 && ii <= i2 && jj >= j1 && jj <= j2 && kk >= k1 && kk <= k2;
+            };
+            if (P.kind == ParamKind::WellPI) {
+                if (P.target >= 0 && P.target < int(a.gLogWI.size())) for (double x : a.gLogWI[size_t(P.target)]) gl += x;
+            } else if (P.kind == ParamKind::MultZ) {
+                for (size_t f = 0; f < grid.conns.size() && f < a.gLogTrans.size(); ++f)
+                    if (grid.conns[f].dir == 'Z' && inBox(grid.conns[f].mq)) gl += a.gLogTrans[f];
+            } else {
+                for (int q = 0; q < g.nx * g.ny * g.nz; ++q) {
+                    if (!inBox(q)) continue;
+                    const int ac = grid.activeOf[size_t(q)];
+                    if (ac < 0) continue;
+                    if (P.kind == ParamKind::PermXY) gl += a.gLogKx[size_t(ac)] + a.gLogKy[size_t(ac)];
+                    else if (P.kind == ParamKind::PermZ) gl += a.gLogKz[size_t(ac)];
+                    else if (g.poro[size_t(q)] < 1.0) gl += a.gLogPoro[size_t(ac)];   // (poro * v clamped at 1)
+                }
+            }
+            // chain rule to the normalised coordinate: d ln v / du
+            const double uk = u[size_t(k)], hu = 1e-6;
+            const double ua = std::max(0.0, uk - hu), ub = std::min(1.0, uk + hu);
+            const double dvdu = (paramFromUnit(P, ub) - paramFromUnit(P, ua)) / (ub - ua);
+            out.grad[size_t(k)] = gl * dvdu / v / std::max(1, nd);
+        }
+    if (forward) {   // Jacobian of the normalised residuals r_i = (y_i - d_i) / sigma_i
+        out.jac.assign(size_t(nd), std::vector<double>(size_t(n), 0.0));
+        for (size_t q = 0; q < aIdx.size(); ++q)
+            for (int k = 0; k < n; ++k) out.jac[size_t(aIdx[q])][size_t(k)] = a.dydp[q][size_t(k)] / ao[q].sigma;
+    }
+    return out;
+}
+} // namespace
+
+GradientCheck misfitGradient(const Case& base, const std::vector<StudyParam>& params, int methods, double fdStep,
+                             const StudyCallbacks& cb, double resStep) {
+    GradientCheck gc;
+    const auto& obs = base.observations;
+    if (obs.empty()) { gc.error = "no observed data"; return gc; }
+    const std::vector<double> sig = autoSigma(obs);
+    for (int i = 0; i < int(params.size()); ++i) if (params[size_t(i)].active) gc.act.push_back(i);
+    const int n = int(gc.act.size());
+    if (n == 0) { gc.error = "no active parameters"; return gc; }
+    std::vector<double> u(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) u[size_t(k)] = paramToUnit(params[size_t(gc.act[size_t(k)])], params[size_t(gc.act[size_t(k)])].base);
+    auto clock = [] { return std::chrono::steady_clock::now(); };
+    auto secs = [](std::chrono::steady_clock::time_point a) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count(); };
+    if (methods & 3) {
+        for (int m = 0; m < 2; ++m) {
+            if (!(methods & (1 << m))) continue;
+            const auto t0 = clock();
+            RecordedRun R = recordedRun(base, params, gc.act, u, cb.cancel);
+            if (!R.run.ok) { gc.error = "base run failed: " + R.run.error; return gc; }
+            gc.misfit = misfit(R.run, R.c, obs, sig);
+            AnalyticOut a = analyticGradient(R, base, params, gc.act, u, sig, m == 1, resStep);
+            if (!a.ok) { gc.error = a.error; return gc; }
+            (m == 0 ? gc.adjoint : gc.forward) = a.grad;
+            (m == 0 ? gc.secAdjoint : gc.secForward) = secs(t0);
+            gc.replayDev = std::max(gc.replayDev, a.replayDev); gc.maxLinRes = std::max(gc.maxLinRes, a.maxLinRes);
+            say(cb, f2s(m == 0 ? "  adjoint gradient: %.2f s (replay deviation %.1e, linear residual %.1e)"
+                               : "  forward sensitivities: %.2f s (replay deviation %.1e, linear residual %.1e)", secs(t0), a.replayDev, a.maxLinRes));
+        }
+    }
+    if (methods & 4) {
+        const auto t0 = clock();
+        std::vector<Case> cases; std::vector<double> du(static_cast<size_t>(n));
+        for (int k = 0; k < n; ++k)
+            for (int s = 0; s < 2; ++s) {
+                std::vector<double> v = baseValues(params);
+                for (int q = 0; q < n; ++q) v[size_t(gc.act[size_t(q)])] = paramFromUnit(params[size_t(gc.act[size_t(q)])], u[size_t(q)]);
+                const double uk = s == 0 ? std::min(1.0, u[size_t(k)] + fdStep) : std::max(0.0, u[size_t(k)] - fdStep);
+                if (s == 0) du[size_t(k)] = uk; else du[size_t(k)] -= uk;
+                v[size_t(gc.act[size_t(k)])] = paramFromUnit(params[size_t(gc.act[size_t(k)])], uk);
+                cases.push_back(applyParams(base, params, v));
+            }
+        auto runs = runBatch(cases, cb.workers, cb.cancel, cb.progress);
+        gc.fdRuns = int(runs.size());
+        gc.fd.resize(size_t(n));
+        for (int k = 0; k < n; ++k) {
+            const RunResult& a = runs[size_t(2 * k)]; const RunResult& b = runs[size_t(2 * k + 1)];
+            gc.fd[size_t(k)] = (a.ok && b.ok) ? (misfit(a, cases[size_t(2 * k)], obs, sig) - misfit(b, cases[size_t(2 * k + 1)], obs, sig)) / du[size_t(k)] : kNaN;
+        }
+        gc.secFd = secs(t0);
+        if (!(methods & 3)) { RunResult r0 = runSingle(applyParams(base, params, baseValues(params)), cb.cancel); gc.misfit = misfit(r0, base, obs, sig); }
+    }
+    gc.ok = true;
+    return gc;
+}
+
+// projected L-BFGS on [0,1]^n driven by the adjoint gradient (Byrd-Lu-Nocedal-Zhu style projection, Armijo backtracking)
+HMResult runAdjointLBFGS(const Case& base, const std::vector<StudyParam>& params, const AdjointHMOptions& opt,
+                         const StudyCallbacks& cb) {
+    HMResult hm;
+    const auto tStart = std::chrono::steady_clock::now();
+    const auto& obs = base.observations;
+    if (obs.empty()) { say(cb, "History matching needs observed data"); return hm; }
+    const std::vector<double> sig = autoSigma(obs);
+    std::vector<int> act;
+    for (int i = 0; i < int(params.size()); ++i) if (params[size_t(i)].active) act.push_back(i);
+    const int n = int(act.size());
+    if (n == 0) { say(cb, "No active parameters"); return hm; }
+    std::vector<double> u(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) u[size_t(k)] = paramToUnit(params[size_t(act[size_t(k)])], params[size_t(act[size_t(k)])].base);
+    auto evalRun = [&](const std::vector<double>& uu, double& f) {
+        RecordedRun R = recordedRun(base, params, act, uu, cb.cancel);
+        hm.runs++;
+        archive1(cb, "adjoint", R.values, R.run);
+        f = R.run.ok ? misfit(R.run, R.c, obs, sig) : std::numeric_limits<double>::infinity();
+        return R;
+    };
+    auto gradOf = [&](RecordedRun& R, const std::vector<double>& uu, std::vector<double>& g) {
+        AnalyticOut a = analyticGradient(R, base, params, act, uu, sig, false, opt.resStep);
+        if (!a.ok) { say(cb, "  adjoint failed: " + a.error); return false; }
+        g = a.grad;
+        return true;
+    };
+    double f = 0;
+    RecordedRun R0 = evalRun(u, f);
+    if (!R0.run.ok) { say(cb, "Base run failed: " + R0.run.error); return hm; }
+    std::vector<double> g;
+    if (!gradOf(R0, u, g)) return hm;
+    hm.initialRun = R0.run; hm.initialMisfit = f; hm.bestMisfit = f; hm.best = R0.values; hm.bestRun = R0.run;
+    // C13: full iteration record (projected-gradient norm, cumulative runs / time, gradient per parameter, the run)
+    auto record = [&](int it, double fv, double alpha, const std::vector<double>& gu, const RunResult& run) {
+        HMIteration h; h.iter = it; h.misfit = fv; h.lambda = alpha; h.values = hm.best; h.runs = hm.runs;
+        h.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count();
+        h.grad.assign(params.size(), std::numeric_limits<double>::quiet_NaN());
+        double gn = 0;
+        for (int k = 0; k < n && size_t(k) < gu.size(); ++k) { h.grad[size_t(act[size_t(k)])] = gu[size_t(k)]; gn += gu[size_t(k)] * gu[size_t(k)]; }
+        h.gradNorm = std::sqrt(gn); h.run = run;
+        hm.history.push_back(std::move(h));
+    };
+    record(0, f, 0, g, R0.run);
+    say(cb, f2s("Adjoint L-BFGS: %g parameters, %g observations, initial misfit %.5g", n, double(obs.size()), f));
+    R0.sim.reset();
+    std::vector<std::vector<double>> S, Y;
+    auto dot = [](const std::vector<double>& a, const std::vector<double>& b) { double s = 0; for (size_t i = 0; i < a.size(); ++i) s += a[i] * b[i]; return s; };
+    double pg0 = -1;
+    for (int it = 1; it <= opt.maxIter && !cancelled(cb); ++it) {
+        std::vector<char> fr(size_t(n), 1);
+        double pgn = 0;
+        for (int k = 0; k < n; ++k) {
+            if ((u[size_t(k)] <= 0 && g[size_t(k)] > 0) || (u[size_t(k)] >= 1 && g[size_t(k)] < 0)) fr[size_t(k)] = 0;
+            else pgn += g[size_t(k)] * g[size_t(k)];
+        }
+        pgn = std::sqrt(pgn);
+        if (pg0 < 0) pg0 = pgn;
+        if (pgn <= 1e-10 || pgn < opt.tol * std::max(pg0, 1e-300) * 1e-2) { say(cb, "  converged (projected gradient)"); break; }
+        // two-loop recursion on the free variables
+        std::vector<double> q(static_cast<size_t>(n));
+        for (int k = 0; k < n; ++k) q[size_t(k)] = fr[size_t(k)] ? g[size_t(k)] : 0.0;
+        const int m = int(S.size());
+        std::vector<double> al(static_cast<size_t>(m));
+        for (int i = m - 1; i >= 0; --i) { al[size_t(i)] = dot(S[size_t(i)], q) / dot(Y[size_t(i)], S[size_t(i)]); for (int k = 0; k < n; ++k) q[size_t(k)] -= al[size_t(i)] * Y[size_t(i)][size_t(k)]; }
+        const double gam = m > 0 ? dot(S.back(), Y.back()) / dot(Y.back(), Y.back()) : 1.0;
+        for (double& v : q) v *= gam;
+        for (int i = 0; i < m; ++i) { const double be = dot(Y[size_t(i)], q) / dot(Y[size_t(i)], S[size_t(i)]); for (int k = 0; k < n; ++k) q[size_t(k)] += S[size_t(i)][size_t(k)] * (al[size_t(i)] - be); }
+        std::vector<double> d(static_cast<size_t>(n));
+        for (int k = 0; k < n; ++k) d[size_t(k)] = fr[size_t(k)] ? -q[size_t(k)] : 0.0;
+        if (dot(d, g) >= 0) { for (int k = 0; k < n; ++k) d[size_t(k)] = fr[size_t(k)] ? -g[size_t(k)] : 0.0; S.clear(); Y.clear(); }
+        double dmax = 0; for (double v : d) dmax = std::max(dmax, std::fabs(v));
+        const double cap = S.empty() ? opt.maxStep : 2.0 * opt.maxStep;
+        if (dmax > cap) for (double& v : d) v *= cap / dmax;
+        // backtracking line search on the projected path
+        double alpha = 1.0; bool acc = false;
+        for (int ls = 0; ls < 6 && !cancelled(cb); ++ls) {
+            std::vector<double> ut(static_cast<size_t>(n));
+            for (int k = 0; k < n; ++k) ut[size_t(k)] = std::max(0.0, std::min(1.0, u[size_t(k)] + alpha * d[size_t(k)]));
+            std::vector<double> st(static_cast<size_t>(n)); for (int k = 0; k < n; ++k) st[size_t(k)] = ut[size_t(k)] - u[size_t(k)];
+            const double slope = dot(g, st);
+            double ft = 0;
+            RecordedRun Rt = evalRun(ut, ft);
+            if (Rt.run.ok && ft <= f + 1e-4 * slope) {
+                std::vector<double> gt;
+                if (!gradOf(Rt, ut, gt)) break;
+                std::vector<double> yv(static_cast<size_t>(n)); for (int k = 0; k < n; ++k) yv[size_t(k)] = gt[size_t(k)] - g[size_t(k)];
+                if (dot(st, yv) > 1e-12 * std::sqrt(dot(st, st) * dot(yv, yv))) {
+                    S.push_back(st); Y.push_back(yv);
+                    if (int(S.size()) > std::max(1, opt.memory)) { S.erase(S.begin()); Y.erase(Y.begin()); }
+                }
+                const double rel = (f - ft) / std::max(f, 1e-300);
+                u = ut; f = ft; g = gt;
+                hm.bestMisfit = f; hm.best = Rt.values; hm.bestRun = Rt.run;
+                std::string vs;
+                for (int k = 0; k < n; ++k) vs += " " + paramLabel(params[size_t(act[size_t(k)])], base) + "=" + f2s("%.4g", hm.best[size_t(act[size_t(k)])]);
+                say(cb, f2s("  iter %g: misfit %.5g  step %.3g ", it, f, alpha) + vs);
+                record(it, f, alpha, g, Rt.run);
+                acc = true;
+                if (rel < opt.tol) { say(cb, "  converged (relative improvement below tolerance)"); it = opt.maxIter + 1; }
+                break;
+            }
+            // quadratic interpolation of the step, safeguarded to [0.1, 0.5] alpha
+            double an = 0.5 * alpha;
+            if (Rt.run.ok && std::isfinite(ft) && slope < 0) {
+                const double den = 2.0 * (ft - f - slope);
+                if (den > 0) an = std::max(0.1 * alpha, std::min(0.5 * alpha, -slope * alpha / den));
+            }
+            alpha = an;
+        }
+        if (!acc) {
+            if (!S.empty()) { S.clear(); Y.clear(); say(cb, "  line search failed - restarting from steepest descent"); continue; }
+            say(cb, "  no further improvement - stopping");
+            break;
+        }
+    }
+    hm.ok = true;
+    say(cb, f2s("Adjoint L-BFGS done: misfit %.5g -> %.5g in %g runs", hm.initialMisfit, hm.bestMisfit, hm.runs));
+    return hm;
+}
+
 // ======================================================================== Levenberg-Marquardt
 HMResult runLevenbergMarquardt(const Case& base, const std::vector<StudyParam>& params, const LMOptions& opt,
                                const StudyCallbacks& cb) {
     HMResult hm;
+    const auto tStart = std::chrono::steady_clock::now();
+    auto stamp = [&](HMIteration& h, const RunResult& run) {
+        h.runs = hm.runs; h.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(); h.run = run;
+    };
     const auto& obs = base.observations;
     if (obs.empty()) { say(cb, "History matching needs observed data"); return hm; }
     const std::vector<double> sig = autoSigma(obs);
@@ -700,26 +1153,42 @@ HMResult runLevenbergMarquardt(const Case& base, const std::vector<StudyParam>& 
     double f = sq(r);
     hm.initialMisfit = f; hm.bestMisfit = f; hm.best = valuesOf(u); hm.bestRun = hm.initialRun;
     hm.history.push_back({0, f, opt.lambda0, hm.best, 0});
+    stamp(hm.history.back(), hm.initialRun);
     say(cb, f2s("LM: %g parameters, %g observations, initial misfit %.5g", n, nd, f));
     double lambda = opt.lambda0;
     for (int it = 1; it <= opt.maxIter && !cancelled(cb); ++it) {
-        // finite-difference Jacobian (parallel)
-        std::vector<Case> cases; std::vector<double> hstep(n);
-        std::vector<std::vector<double>> jv;
-        for (int k = 0; k < n; ++k) {
-            std::vector<double> up = u;
-            hstep[k] = (u[k] + opt.fdStep <= 1.0) ? opt.fdStep : -opt.fdStep;
-            up[k] += hstep[k];
-            jv.push_back(valuesOf(up));
-            cases.push_back(applyParams(base, params, jv.back()));
-        }
-        auto runs = runBatch(cases, cb.workers, cb.cancel, cb.progress);
-        archive(cb, "LM", jv, runs);
-        hm.runs += n;
         std::vector<double> J(size_t(nd) * n);
-        for (int k = 0; k < n; ++k) {
-            const auto rk = residuals(runs[k], cases[k], obs, sig);
-            for (int i = 0; i < nd; ++i) J[size_t(i) * n + k] = runs[k].ok ? (rk[i] - r[i]) / hstep[k] : 0.0;
+        bool haveJ = false;
+        if (opt.gradient == GradientMethod::Analytic) {
+            // exact Jacobian of the discrete model: one recorded run + forward sensitivities (no extra simulations)
+            RecordedRun R = recordedRun(base, params, act, u, cb.cancel);
+            hm.runs++;
+            if (R.run.ok) {
+                AnalyticOut a = analyticGradient(R, base, params, act, u, sig, true, opt.resStep);
+                if (a.ok) {
+                    for (int i = 0; i < nd; ++i) for (int k = 0; k < n; ++k) J[size_t(i) * n + k] = a.jac[size_t(i)][size_t(k)];
+                    haveJ = true;
+                } else say(cb, "  analytic sensitivities failed (" + a.error + ") - finite differences used");
+            }
+        }
+        if (!haveJ) {
+            // finite-difference Jacobian (parallel)
+            std::vector<Case> cases; std::vector<double> hstep(n);
+            std::vector<std::vector<double>> jv;
+            for (int k = 0; k < n; ++k) {
+                std::vector<double> up = u;
+                hstep[k] = (u[k] + opt.fdStep <= 1.0) ? opt.fdStep : -opt.fdStep;
+                up[k] += hstep[k];
+                jv.push_back(valuesOf(up));
+                cases.push_back(applyParams(base, params, jv.back()));
+            }
+            auto runs = runBatch(cases, cb.workers, cb.cancel, cb.progress);
+            archive(cb, "LM", jv, runs);
+            hm.runs += n;
+            for (int k = 0; k < n; ++k) {
+                const auto rk = residuals(runs[k], cases[k], obs, sig);
+                for (int i = 0; i < nd; ++i) J[size_t(i) * n + k] = runs[k].ok ? (rk[i] - r[i]) / hstep[k] : 0.0;
+            }
         }
         std::vector<double> JtJ(size_t(n) * n, 0.0), g(n, 0.0);
         for (int i = 0; i < nd; ++i)
@@ -728,6 +1197,13 @@ HMResult runLevenbergMarquardt(const Case& base, const std::vector<StudyParam>& 
                 g[a] += ja * r[i];
                 for (int b = 0; b < n; ++b) JtJ[size_t(a) * n + b] += ja * J[size_t(i) * n + b];
             }
+        {   // gradient of the misfit (sum r^2 / nd) at the current iterate: 2 J^T r / nd
+            HMIteration& h = hm.history.back();
+            h.grad.assign(params.size(), std::numeric_limits<double>::quiet_NaN());
+            double gn = 0;
+            for (int k = 0; k < n; ++k) { const double gk = 2.0 * g[k] / nd; h.grad[size_t(act[k])] = gk; gn += gk * gk; }
+            h.gradNorm = std::sqrt(gn);
+        }
         // three damping values tried in parallel
         bool accepted = false;
         for (int attempt = 0; attempt < 4 && !accepted && !cancelled(cb); ++attempt) {
@@ -763,6 +1239,7 @@ HMResult runLevenbergMarquardt(const Case& base, const std::vector<StudyParam>& 
                 for (int k = 0; k < n; ++k) vs += " " + paramLabel(params[act[k]], base) + "=" + f2s("%.4g", hm.best[act[k]]);
                 say(cb, f2s("  iter %g: misfit %.5g  lambda %.3g ", it, f, lambda) + vs);
                 hm.history.push_back({it, f, lambda, hm.best, 0});
+                stamp(hm.history.back(), tr[bi]);
                 if (rel < opt.tol) { say(cb, "  converged (relative improvement below tolerance)"); it = opt.maxIter + 1; }
             } else lambda *= 100;
         }
@@ -1062,7 +1539,27 @@ std::vector<double> unitOf(const ProxyModel& m, const std::vector<StudyParam>& p
     for (int k : m.act) u.push_back(paramToUnit(params[size_t(k)], k < int(values.size()) ? values[size_t(k)] : params[size_t(k)].base));
     return u;
 }
+// C28 Gaussian process: k(u, v) = sf2 exp(-1/2 sum ((u_k - v_k) / ell_k)^2)
+double gpKernel(const ProxyModel& m, const std::vector<double>& u, const std::vector<double>& v) {
+    double q = 0;
+    for (size_t k = 0; k < u.size() && k < m.gpEll.size(); ++k) { const double d = (u[k] - v[k]) / m.gpEll[k]; q += d * d; }
+    return m.gpSf2 * std::exp(-0.5 * q);
+}
+double gpPredictUnit(const ProxyModel& m, const std::vector<double>& u, double* sd) {
+    const size_t ns = m.gpX.size();
+    std::vector<double> ks(ns);
+    double f = 0;
+    for (size_t i = 0; i < ns; ++i) { ks[i] = gpKernel(m, u, m.gpX[i]); f += ks[i] * m.gpAlpha[i]; }
+    if (sd) {   // v = L^-1 k*, var = sf2 - v.v
+        std::vector<double> v(ns);
+        for (size_t i = 0; i < ns; ++i) { double t = ks[i]; for (size_t j = 0; j < i; ++j) t -= m.gpL[i * ns + j] * v[j]; v[i] = t / m.gpL[i * ns + i]; }
+        double vv = 0; for (double x : v) vv += x * x;
+        *sd = m.gpScale * std::sqrt(std::max(0.0, m.gpSf2 - vv));
+    }
+    return m.gpMean + m.gpScale * f;
+}
 double predictUnit(const ProxyModel& m, const std::vector<double>& u) {
+    if (m.kind == 1) return gpPredictUnit(m, u, nullptr);
     const auto x = proxyFeatures(u, m.quadratic);
     double s = 0; for (size_t i = 0; i < x.size() && i < m.coef.size(); ++i) s += x[i] * m.coef[i];
     return s;
@@ -1131,6 +1628,136 @@ ProxyModel fitProxy(const std::vector<StudyParam>& params, const std::vector<std
     return m;
 }
 
+// ---- C28 Gaussian-process proxy
+namespace {
+// Cholesky of the dense SPD matrix A (row-major, lower factor in place); false if not positive definite
+bool cholesky(std::vector<double>& A, size_t n) {
+    for (size_t j = 0; j < n; ++j) {
+        double d = A[j * n + j];
+        for (size_t k = 0; k < j; ++k) d -= A[j * n + k] * A[j * n + k];
+        if (!(d > 0)) return false;
+        d = std::sqrt(d); A[j * n + j] = d;
+        for (size_t i = j + 1; i < n; ++i) {
+            double t = A[i * n + j];
+            for (size_t k = 0; k < j; ++k) t -= A[i * n + k] * A[j * n + k];
+            A[i * n + j] = t / d;
+        }
+        for (size_t k = j + 1; k < n; ++k) A[j * n + k] = 0;
+    }
+    return true;
+}
+// negative log marginal likelihood for the hyper-parameters th = (log ell_1..n, log sf2, log sn2); fills L / alpha
+double gpNll(ProxyModel& m, const std::vector<double>& th, const std::vector<double>& ys, bool keep) {
+    const size_t n = m.act.size(), ns = m.gpX.size();
+    ProxyModel t = m;
+    t.gpEll.assign(n, 1.0);
+    for (size_t k = 0; k < n; ++k) t.gpEll[k] = std::exp(std::clamp(th[k], std::log(0.02), std::log(20.0)));
+    t.gpSf2 = std::exp(std::clamp(th[n], std::log(0.05), std::log(20.0)));
+    t.gpSn2 = std::exp(std::clamp(th[n + 1], std::log(1e-8), std::log(1.0)));
+    std::vector<double> K(ns * ns);
+    for (size_t i = 0; i < ns; ++i)
+        for (size_t j = 0; j <= i; ++j) { const double k = gpKernel(t, t.gpX[i], t.gpX[j]); K[i * ns + j] = K[j * ns + i] = k; }
+    for (size_t i = 0; i < ns; ++i) K[i * ns + i] += t.gpSn2 + 1e-10 * t.gpSf2;
+    if (!cholesky(K, ns)) return 1e300;
+    std::vector<double> z(ns), a(ns);
+    for (size_t i = 0; i < ns; ++i) { double v = ys[i]; for (size_t j = 0; j < i; ++j) v -= K[i * ns + j] * z[j]; z[i] = v / K[i * ns + i]; }
+    for (size_t ii = ns; ii-- > 0;) { double v = z[ii]; for (size_t j = ii + 1; j < ns; ++j) v -= K[j * ns + ii] * a[j]; a[ii] = v / K[ii * ns + ii]; }
+    double nll = 0;
+    for (size_t i = 0; i < ns; ++i) nll += 0.5 * ys[i] * a[i] + std::log(K[i * ns + i]);
+    nll += 0.5 * double(ns) * std::log(2 * 3.141592653589793);
+    if (keep) { t.gpL = std::move(K); t.gpAlpha = std::move(a); t.gpLogLik = -nll; m = std::move(t); }
+    return nll;
+}
+// Nelder-Mead minimisation (unconstrained; the bounds are applied by clamping inside the objective)
+std::vector<double> nelderMead(const std::function<double(const std::vector<double>&)>& f, std::vector<double> x0, double step, int maxEval) {
+    const size_t n = x0.size();
+    std::vector<std::vector<double>> P(n + 1, x0); std::vector<double> F(n + 1);
+    for (size_t i = 0; i < n; ++i) P[i + 1][i] += step;
+    for (size_t i = 0; i <= n; ++i) F[i] = f(P[i]);
+    int ev = int(n) + 1;
+    while (ev < maxEval) {
+        std::vector<size_t> o(n + 1); std::iota(o.begin(), o.end(), size_t(0));
+        std::sort(o.begin(), o.end(), [&](size_t a, size_t b) { return F[a] < F[b]; });
+        std::vector<std::vector<double>> Q; std::vector<double> G; for (size_t i : o) { Q.push_back(P[i]); G.push_back(F[i]); }
+        P = Q; F = G;
+        if (std::fabs(F[n] - F[0]) < 1e-9 * (1 + std::fabs(F[0]))) break;
+        std::vector<double> c(n, 0.0);
+        for (size_t i = 0; i < n; ++i) for (size_t k = 0; k < n; ++k) c[k] += P[i][k] / double(n);
+        auto lin = [&](double t) { std::vector<double> x(n); for (size_t k = 0; k < n; ++k) x[k] = c[k] + t * (P[n][k] - c[k]); return x; };
+        const auto xr = lin(-1.0); const double fr = f(xr); ++ev;
+        if (fr < F[0]) { const auto xe = lin(-2.0); const double fe = f(xe); ++ev; if (fe < fr) { P[n] = xe; F[n] = fe; } else { P[n] = xr; F[n] = fr; } }
+        else if (fr < F[n - 1]) { P[n] = xr; F[n] = fr; }
+        else {
+            const auto xc = fr < F[n] ? lin(-0.5) : lin(0.5); const double fc = f(xc); ++ev;
+            if (fc < std::min(fr, F[n])) { P[n] = xc; F[n] = fc; }
+            else { for (size_t i = 1; i <= n; ++i) { for (size_t k = 0; k < n; ++k) P[i][k] = P[0][k] + 0.5 * (P[i][k] - P[0][k]); F[i] = f(P[i]); ++ev; } }
+        }
+    }
+    size_t b = size_t(std::min_element(F.begin(), F.end()) - F.begin());
+    return P[b];
+}
+}  // namespace
+
+ProxyModel fitProxyGP(const std::vector<StudyParam>& params, const std::vector<std::vector<double>>& values, const std::vector<double>& y) {
+    ProxyModel m; m.kind = 1; m.quadratic = false;
+    for (int i = 0; i < int(params.size()); ++i) if (params[i].active) m.act.push_back(i);
+    const size_t n = m.act.size();
+    if (n == 0) return m;
+    std::vector<double> Y;
+    for (size_t s = 0; s < values.size() && s < y.size(); ++s) {
+        if (!std::isfinite(y[s])) continue;
+        m.gpX.push_back(unitOf(m, params, values[s])); Y.push_back(y[s]);
+    }
+    const size_t ns = Y.size();
+    m.samples = int(ns);
+    if (ns < 3) return m;
+    double mean = 0; for (double v : Y) mean += v; mean /= double(ns);
+    double var = 0; for (double v : Y) var += (v - mean) * (v - mean); var /= double(ns);
+    m.gpMean = mean; m.gpScale = var > 0 ? std::sqrt(var) : 1.0;
+    std::vector<double> ys(ns); for (size_t i = 0; i < ns; ++i) ys[i] = (Y[i] - mean) / m.gpScale;
+    auto f = [&](const std::vector<double>& th) { return gpNll(m, th, ys, false); };
+    std::vector<double> best; double fb = 1e300;
+    for (double ell0 : {0.3, 1.0}) {   // two starts: short / long correlation
+        std::vector<double> th0(n + 2, std::log(ell0)); th0[n] = 0.0; th0[n + 1] = std::log(1e-4);
+        const auto th = nelderMead(f, th0, 0.7, 250 * int(n + 2));
+        const double v = f(th);
+        if (v < fb) { fb = v; best = th; }
+    }
+    if (fb >= 1e299) return m;
+    gpNll(m, best, ys, true);
+    // fit + exact leave-one-out residuals: e_i = alpha_i / [K^-1]_ii
+    std::vector<double> Kinv(ns * ns, 0.0);
+    for (size_t c2 = 0; c2 < ns; ++c2) {
+        std::vector<double> z(ns), a(ns);
+        for (size_t i = 0; i < ns; ++i) { double v = i == c2 ? 1.0 : 0.0; for (size_t j = 0; j < i; ++j) v -= m.gpL[i * ns + j] * z[j]; z[i] = v / m.gpL[i * ns + i]; }
+        for (size_t ii = ns; ii-- > 0;) { double v = z[ii]; for (size_t j = ii + 1; j < ns; ++j) v -= m.gpL[j * ns + ii] * a[j]; a[ii] = v / m.gpL[ii * ns + ii]; }
+        for (size_t i = 0; i < ns; ++i) Kinv[i * ns + c2] = a[i];
+    }
+    double sst = 0, sse = 0, press = 0;
+    for (size_t i = 0; i < ns; ++i) {
+        const double fit = ys[i] - (m.gpSn2 + 1e-10 * m.gpSf2) * m.gpAlpha[i];
+        const double e = ys[i] - fit, el = m.gpAlpha[i] / Kinv[i * ns + i];
+        sst += ys[i] * ys[i]; sse += e * e; press += el * el;
+    }
+    m.r2 = sst > 0 ? 1 - sse / sst : 1.0;
+    m.q2 = sst > 0 ? 1 - press / sst : 1.0;
+    m.rmse = m.gpScale * std::sqrt(sse / double(ns));
+    m.coef.clear();
+    m.ok = true;
+    for (size_t k = 0; k < n; ++k) {
+        std::vector<double> u(n, 0.5), v = u; u[k] = 0; v[k] = 1;
+        const double lo = predictUnit(m, u), hi = predictUnit(m, v), mid = predictUnit(m, std::vector<double>(n, 0.5));
+        m.importance.push_back(std::max({std::fabs(hi - lo), std::fabs(hi - mid), std::fabs(lo - mid)}));
+    }
+    return m;
+}
+
+double proxyStd(const ProxyModel& m, const std::vector<StudyParam>& params, const std::vector<double>& values) {
+    if (!m.ok || m.kind != 1) return kNaN;
+    double sd = 0; gpPredictUnit(m, unitOf(m, params, values), &sd);
+    return sd;
+}
+
 double proxyPredict(const ProxyModel& m, const std::vector<StudyParam>& params, const std::vector<double>& values) {
     if (!m.ok) return kNaN;
     return predictUnit(m, unitOf(m, params, values));
@@ -1162,6 +1789,435 @@ std::vector<double> proxyOptimum(const ProxyModel& m, const std::vector<StudyPar
     for (int k = 0; k < n; ++k) v[size_t(m.act[size_t(k)])] = paramFromUnit(params[size_t(m.act[size_t(k)])], best[size_t(k)]);
     if (predicted) *predicted = sg * bf;
     return v;
+}
+
+} // namespace ressim
+
+// ======================================================================== C11: per-cell field history matching (adjoint)
+namespace ressim {
+
+Case applyFieldMultipliers(const Case& base, const std::vector<double>& multK, const std::vector<double>& multPhi) {
+    Case c = base;
+    GridInput& g = c.grid;
+    const size_t n = size_t(g.nx) * g.ny * g.nz;
+    if (multK.size() == n && g.permx.size() >= n) {
+        if (g.permz.empty()) g.permz = g.permx;
+        for (size_t q = 0; q < n; ++q) {
+            g.permx[q] *= multK[q];
+            if (q < g.permy.size()) g.permy[q] *= multK[q];
+            if (q < g.permz.size()) g.permz[q] *= multK[q];
+        }
+    }
+    if (multPhi.size() == n && g.poro.size() >= n)
+        for (size_t q = 0; q < n; ++q) g.poro[q] = std::min(1.0, g.poro[q] * multPhi[q]);
+    return c;
+}
+
+FieldHMResult runAdjointFieldHM(const Case& base, const FieldHMOptions& opt, const StudyCallbacks& cb) {
+    FieldHMResult out;
+    const auto tStart = std::chrono::steady_clock::now();
+    try {
+        const auto& obs = base.observations;
+        if (obs.empty()) throw std::runtime_error("no observed data");
+        if (!opt.perm && !opt.poro) throw std::runtime_error("nothing to match (enable permeability and / or porosity)");
+        const std::vector<double> sig = autoSigma(obs);
+        const int nd = std::max(1, int(obs.size()));
+        Grid G; { Case gc = base; expandLgrArrays(gc); G.build(gc); }
+        if (opt.perm && !G.fieldDerivOk) throw std::runtime_error("per-cell permeability matching needs a grid without LGRs / dual porosity");
+        const int na = G.numActive(), ncell = base.grid.nx * base.grid.ny * base.grid.nz;
+        if (G.numLgrCells() > 0) throw std::runtime_error("per-cell matching does not support local grid refinements yet");
+        const int nb = (opt.perm ? 1 : 0) + (opt.poro ? 1 : 0), nvar = na * nb;
+        const double xlo = std::log(opt.lo), xhi = std::log(opt.hi);
+        // smoothness pairs (grid neighbours)
+        std::vector<std::pair<int, int>> pairs;
+        for (const Connection& cn : G.conns) if (cn.dir == 'X' || cn.dir == 'Y' || cn.dir == 'Z') pairs.push_back({cn.a, cn.b});
+        const double nf = std::max<size_t>(1, pairs.size());
+        auto mults = [&](const std::vector<double>& x, std::vector<double>& mK, std::vector<double>& mP) {
+            mK.clear(); mP.clear();
+            if (opt.perm) mK.assign(size_t(ncell), 1.0);
+            if (opt.poro) mP.assign(size_t(ncell), 1.0);
+            for (int a = 0; a < na; ++a) {
+                const int q = G.globalOf[size_t(a)];
+                int o = 0;
+                if (opt.perm) mK[size_t(q)] = std::exp(x[size_t(a) * nb + o++]);
+                if (opt.poro) mP[size_t(q)] = std::exp(x[size_t(a) * nb + o]);
+            }
+        };
+        struct Eval { bool ok = false; double J = 0, mis = 0, reg = 0; std::vector<double> g, gd; RunResult run; };
+        auto evaluate = [&](const std::vector<double>& x, bool wantGrad) {
+            Eval E;
+            std::vector<double> mK, mP; mults(x, mK, mP);
+            const Case c = applyFieldMultipliers(base, mK, mP);
+            Simulator S; S.cancel = cb.cancel; S.setAdjointRecording(wantGrad);
+            const auto t0 = std::chrono::steady_clock::now();
+            try {
+                S.setup(c); S.initialize();
+                while (!S.finished()) if (!S.runReportStep()) break;
+            } catch (const std::exception& e) { E.run.error = e.what(); return E; }
+            out.secForward += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            ++out.runs;
+            E.run.summary = S.summary(); E.run.stats = S.stats(); E.run.ok = S.finished();
+            if (!E.run.ok) return E;
+            std::vector<Simulator::AdjObs> ao;
+            for (int i = 0; i < int(obs.size()); ++i) {
+                if (!(sig[size_t(i)] < 1e29)) continue;
+                Simulator::AdjObs o; o.qty = obs[size_t(i)].qty; o.time = obs[size_t(i)].time; o.value = obs[size_t(i)].value; o.sigma = sig[size_t(i)];
+                if (obsIsWell(o.qty)) { o.well = wellIndex(c, obs[size_t(i)].well); if (o.well < 0) continue; }
+                ao.push_back(o);
+            }
+            double reg = 0;
+            for (auto& pr : pairs)
+                for (int o = 0; o < nb; ++o) { const double d = x[size_t(pr.first) * nb + o] - x[size_t(pr.second) * nb + o]; reg += d * d; }
+            reg *= opt.regWeight / nf;
+            E.reg = reg;
+            if (!wantGrad) {   // misfit only
+                E.mis = misfit(E.run, c, obs, sig);
+                E.J = E.mis + reg; E.ok = std::isfinite(E.J); return E;
+            }
+            Simulator::AdjFieldReq fr; fr.perm = opt.perm; fr.poro = opt.poro;
+            const auto t1 = std::chrono::steady_clock::now();
+            const Simulator::AdjResult A = S.adjointGradient(ao, {}, false, &fr);
+            out.secAdjoint += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+            if (!A.ok) throw std::runtime_error("adjoint: " + A.error);
+            E.mis = A.F / nd; E.J = E.mis + reg;
+            E.g.assign(size_t(nvar), 0.0);
+            for (int a = 0; a < na; ++a) {
+                int o = 0;
+                if (opt.perm) E.g[size_t(a) * nb + o++] = (A.gLogKx[size_t(a)] + A.gLogKy[size_t(a)] + A.gLogKz[size_t(a)]) / nd;
+                if (opt.poro) E.g[size_t(a) * nb + o] = A.gLogPoro[size_t(a)] / nd;
+            }
+            E.gd = E.g;   // data-misfit part (sensitivity maps)
+            for (auto& pr : pairs)
+                for (int o = 0; o < nb; ++o) {
+                    const double d = 2 * opt.regWeight / nf * (x[size_t(pr.first) * nb + o] - x[size_t(pr.second) * nb + o]);
+                    E.g[size_t(pr.first) * nb + o] += d; E.g[size_t(pr.second) * nb + o] -= d;
+                }
+            E.ok = std::isfinite(E.J);
+            return E;
+        };
+        std::vector<double> x(static_cast<size_t>(nvar), 0.0);
+        Eval cur = evaluate(x, true);
+        if (!cur.ok) throw std::runtime_error("the base run failed: " + cur.run.error);
+        out.initialMisfit = cur.mis; out.history.push_back(cur.mis); out.initialRun = cur.run;
+        out.nx = base.grid.nx; out.ny = base.grid.ny; out.nz = base.grid.nz;
+        // C13: per-iteration record (statistics, ln-multiplier snapshots as float, the run)
+        auto toGlobal = [&](const std::vector<double>& v, int o, std::vector<float>& dst, float fill) {
+            dst.assign(size_t(ncell), fill);
+            for (int a = 0; a < na; ++a) dst[size_t(G.globalOf[size_t(a)])] = float(v[size_t(a) * nb + o]);
+        };
+        auto record = [&](int it, const Eval& E, const std::vector<double>& xv, double step) {
+            FieldHMResult::Iter r; r.iter = it; r.runs = out.runs; r.misfit = E.mis; r.objective = E.J; r.reg = E.reg; r.step = step;
+            r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count();
+            double gn = 0; for (double v : E.g) gn += v * v; r.gradNorm = std::sqrt(gn);
+            int o = 0;
+            auto stats = [&](int oo, double& mn, double& mx, double& me) {
+                mn = 1e300; mx = -1e300; me = 0;
+                for (int a = 0; a < na; ++a) { const double m = std::exp(xv[size_t(a) * nb + oo]); mn = std::min(mn, m); mx = std::max(mx, m); me += m; }
+                me /= std::max(1, na);
+            };
+            if (opt.perm) { stats(o, r.kMin, r.kMax, r.kMean); toGlobal(xv, o, r.lnK, 0.0f); ++o; }
+            if (opt.poro) { stats(o, r.phiMin, r.phiMax, r.phiMean); toGlobal(xv, o, r.lnPhi, 0.0f); }
+            r.run = E.run;
+            out.iters.push_back(std::move(r));
+        };
+        auto gradMaps = [&](const Eval& E, std::vector<float>& gk, std::vector<float>& gp) {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            int o = 0;
+            if (opt.perm) { toGlobal(E.gd, o, gk, nan); ++o; } else gk.clear();
+            if (opt.poro) toGlobal(E.gd, o, gp, nan); else gp.clear();
+        };
+        record(0, cur, x, 0.0);
+        gradMaps(cur, out.gradK0, out.gradPhi0);
+        say(cb, f2s("Field HM (adjoint): %g cells x %g fields = %g unknowns, initial misfit %.5g", na, nb, cur.mis));
+        say(cb, f2s("  observations %g", double(obs.size())));
+        std::vector<std::vector<double>> Sm, Ym;
+        auto clampv = [&](double v) { return std::min(xhi, std::max(xlo, v)); };
+        for (int it = 0; it < opt.maxIter; ++it) {
+            if (cancelled(cb)) break;
+            // two-loop recursion
+            std::vector<double> q = cur.g;
+            const int m = int(Sm.size());
+            std::vector<double> al(static_cast<size_t>(m)), rho(static_cast<size_t>(m));
+            auto dot = [](const std::vector<double>& a, const std::vector<double>& b) { double s = 0; for (size_t i = 0; i < a.size(); ++i) s += a[i] * b[i]; return s; };
+            for (int i = m - 1; i >= 0; --i) { rho[size_t(i)] = 1.0 / dot(Ym[size_t(i)], Sm[size_t(i)]); al[size_t(i)] = rho[size_t(i)] * dot(Sm[size_t(i)], q); for (int k = 0; k < nvar; ++k) q[size_t(k)] -= al[size_t(i)] * Ym[size_t(i)][size_t(k)]; }
+            double gam = m > 0 ? dot(Sm[size_t(m) - 1], Ym[size_t(m) - 1]) / dot(Ym[size_t(m) - 1], Ym[size_t(m) - 1]) : 0.0;
+            if (m == 0) { double gmx = 0; for (double v : cur.g) gmx = std::max(gmx, std::fabs(v)); gam = gmx > 0 ? 0.25 * opt.maxLogStep / gmx : 1.0; }
+            for (double& v : q) v *= gam;
+            for (int i = 0; i < m; ++i) { const double be = rho[size_t(i)] * dot(Ym[size_t(i)], q); for (int k = 0; k < nvar; ++k) q[size_t(k)] += Sm[size_t(i)][size_t(k)] * (al[size_t(i)] - be); }
+            // direction -q, limited step, projection on the bounds; fall back to steepest descent if not a descent direction
+            std::vector<double> d(static_cast<size_t>(nvar));
+            for (int k = 0; k < nvar; ++k) d[size_t(k)] = -q[size_t(k)];
+            if (dot(d, cur.g) >= 0) { Sm.clear(); Ym.clear(); double gmx = 0; for (double v : cur.g) gmx = std::max(gmx, std::fabs(v)); for (int k = 0; k < nvar; ++k) d[size_t(k)] = -cur.g[size_t(k)] * (gmx > 0 ? 0.25 * opt.maxLogStep / gmx : 0.0); }
+            double dmx = 0; for (double v : d) dmx = std::max(dmx, std::fabs(v));
+            double alpha = dmx > opt.maxLogStep ? opt.maxLogStep / dmx : 1.0;
+            bool accepted = false;
+            double alphaAcc = 0;
+            std::vector<double> xn(static_cast<size_t>(nvar));
+            Eval nx;
+            for (int ls = 0; ls < 8 && !accepted; ++ls, alpha *= 0.5) {
+                for (int k = 0; k < nvar; ++k) xn[size_t(k)] = clampv(x[size_t(k)] + alpha * d[size_t(k)]);
+                double dec = 0; for (int k = 0; k < nvar; ++k) dec += cur.g[size_t(k)] * (xn[size_t(k)] - x[size_t(k)]);
+                if (dec >= 0) continue;
+                nx = evaluate(xn, true);
+                if (nx.ok && nx.J <= cur.J + 1e-4 * dec) { accepted = true; alphaAcc = alpha * dmx; }
+            }
+            if (!accepted) { say(cb, "  line search failed - stopping"); break; }
+            std::vector<double> sv(static_cast<size_t>(nvar)), yv(static_cast<size_t>(nvar));
+            for (int k = 0; k < nvar; ++k) { sv[size_t(k)] = xn[size_t(k)] - x[size_t(k)]; yv[size_t(k)] = nx.g[size_t(k)] - cur.g[size_t(k)]; }
+            if (dot(sv, yv) > 1e-12 * std::sqrt(dot(sv, sv) * dot(yv, yv))) { Sm.push_back(sv); Ym.push_back(yv); if (int(Sm.size()) > opt.memory) { Sm.erase(Sm.begin()); Ym.erase(Ym.begin()); } }
+            const double rel = (cur.J - nx.J) / std::max(std::fabs(cur.J), 1e-300);
+            x = xn; cur = std::move(nx); ++out.iterations;
+            out.history.push_back(cur.mis);
+            record(out.iterations, cur, x, alphaAcc);
+            say(cb, f2s("  iteration %g: misfit %.5g (objective %.5g)", it + 1, cur.mis, cur.J));
+            if (rel < opt.tol) break;
+        }
+        gradMaps(cur, out.gradK, out.gradPhi);
+        mults(x, out.multK, out.multPhi);
+        out.best = applyFieldMultipliers(base, out.multK, out.multPhi);
+        out.bestMisfit = cur.mis; out.bestObjective = cur.J; out.bestRun = cur.run;
+        out.ok = true;
+        say(cb, f2s("Field HM done: misfit %.5g -> %.5g in %g runs", out.initialMisfit, out.bestMisfit, out.runs));
+    } catch (const std::exception& e) { out.ok = false; out.error = e.what(); }
+    return out;
+}
+
+
+// ======================================================================== C27 inversion statistics (iTOUGH2-style)
+namespace {
+// symmetric eigen-decomposition (cyclic Jacobi): A = V diag(w) V^T, columns of V in vec[k][i] = V(i, k)
+void symEigen(std::vector<double> A, int n, std::vector<double>& w, std::vector<std::vector<double>>& vec) {
+    std::vector<double> V(size_t(n) * n, 0.0);
+    for (int i = 0; i < n; ++i) V[size_t(i) * n + i] = 1;
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off = 0;
+        for (int i = 0; i < n; ++i) for (int j = i + 1; j < n; ++j) off += A[size_t(i) * n + j] * A[size_t(i) * n + j];
+        if (off < 1e-30) break;
+        for (int p = 0; p < n; ++p)
+            for (int q = p + 1; q < n; ++q) {
+                const double apq = A[size_t(p) * n + q];
+                if (std::fabs(apq) < 1e-300) continue;
+                const double app = A[size_t(p) * n + p], aqq = A[size_t(q) * n + q];
+                const double th = 0.5 * (aqq - app) / apq;
+                const double t = (th >= 0 ? 1.0 : -1.0) / (std::fabs(th) + std::sqrt(th * th + 1.0));
+                const double c = 1.0 / std::sqrt(t * t + 1.0), sn = t * c;
+                for (int k = 0; k < n; ++k) {
+                    const double akp = A[size_t(k) * n + p], akq = A[size_t(k) * n + q];
+                    A[size_t(k) * n + p] = c * akp - sn * akq; A[size_t(k) * n + q] = sn * akp + c * akq;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const double apk = A[size_t(p) * n + k], aqk = A[size_t(q) * n + k];
+                    A[size_t(p) * n + k] = c * apk - sn * aqk; A[size_t(q) * n + k] = sn * apk + c * aqk;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const double vkp = V[size_t(k) * n + p], vkq = V[size_t(k) * n + q];
+                    V[size_t(k) * n + p] = c * vkp - sn * vkq; V[size_t(k) * n + q] = sn * vkp + c * vkq;
+                }
+            }
+    }
+    w.assign(size_t(n), 0.0); vec.assign(size_t(n), std::vector<double>(size_t(n), 0.0));
+    for (int k = 0; k < n; ++k) { w[size_t(k)] = A[size_t(k) * n + k]; for (int i = 0; i < n; ++i) vec[size_t(k)][size_t(i)] = V[size_t(i) * n + k]; }
+}
+}  // namespace
+
+HMStatistics hmStatistics(const Case& base, const std::vector<StudyParam>& params, const std::vector<double>& values,
+                          const HMStatsOptions& opt, const StudyCallbacks& cb) {
+    HMStatistics S;
+    const auto& obs = base.observations;
+    if (obs.empty()) { S.error = "inversion statistics need observed data"; return S; }
+    if (values.size() != params.size()) { S.error = "one value per parameter expected"; return S; }
+    for (int i = 0; i < int(params.size()); ++i) if (params[size_t(i)].active) S.param.push_back(i);
+    const int n = int(S.param.size()), m = int(obs.size());
+    if (n == 0) { S.error = "no active parameters"; return S; }
+    if (m <= n) { S.error = f2s("%g observations for %g parameters: at least n + 1 observations are needed", m, n); return S; }
+    S.nObs = m; S.nPar = n;
+    const std::vector<double> sig = autoSigma(obs);
+    // search coordinate: log10 for log parameters
+    auto toX = [&](const StudyParam& P, double v) { return P.log ? std::log10(std::max(v, 1e-300)) : v; };
+    auto fromX = [&](const StudyParam& P, double x) { return P.log ? std::pow(10.0, x) : x; };
+    std::vector<double> x(static_cast<size_t>(n)), h(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) {
+        const StudyParam& P = params[size_t(S.param[size_t(k)])];
+        S.name.push_back(paramLabel(P, base)); S.value.push_back(values[size_t(S.param[size_t(k)])]); S.logSpace.push_back(P.log);
+        x[size_t(k)] = toX(P, S.value.back());
+        const double range = std::fabs(toX(P, P.high) - toX(P, P.low));
+        h[size_t(k)] = std::max(1e-6, opt.fdStep * (range > 0 ? range : std::max(1.0, std::fabs(x[size_t(k)]))));
+        if (toX(P, P.high) < x[size_t(k)] + h[size_t(k)] && toX(P, P.low) <= x[size_t(k)] - h[size_t(k)]) h[size_t(k)] = -h[size_t(k)];   // stay inside the box
+    }
+    std::vector<Case> cases; std::vector<std::vector<double>> vals;
+    vals.push_back(values); cases.push_back(applyParams(base, params, values));
+    for (int k = 0; k < n; ++k) {
+        std::vector<double> v = values;
+        const StudyParam& P = params[size_t(S.param[size_t(k)])];
+        v[size_t(S.param[size_t(k)])] = fromX(P, x[size_t(k)] + h[size_t(k)]);
+        vals.push_back(v); cases.push_back(applyParams(base, params, v));
+    }
+    say(cb, f2s("Inversion statistics: %g parameters, %g observations, %g runs", n, m, n + 1));
+    const auto runs = runBatch(cases, cb.workers, cb.cancel, cb.progress);
+    archive(cb, "stats", vals, runs);
+    S.runs = int(runs.size());
+    if (cancelled(cb)) { S.error = "cancelled"; return S; }
+    if (!runs[0].ok) { S.error = "run at the analysis point failed: " + runs[0].error; return S; }
+    const std::vector<double> r = residuals(runs[0], cases[0], obs, sig);
+    std::vector<double> J(size_t(m) * n, 0.0);
+    for (int k = 0; k < n; ++k) {
+        if (!runs[size_t(k) + 1].ok) { S.error = "perturbed run of " + S.name[size_t(k)] + " failed: " + runs[size_t(k) + 1].error; return S; }
+        const auto rk = residuals(runs[size_t(k) + 1], cases[size_t(k) + 1], obs, sig);
+        for (int i = 0; i < m; ++i) J[size_t(i) * n + k] = (rk[size_t(i)] - r[size_t(i)]) / h[size_t(k)];
+    }
+    S.residual = r;
+    double ssr = 0; for (double v : r) ssr += v * v;
+    S.objective = ssr; S.s02 = ssr / double(m - n);
+    // Fisher matrix J^T J, eigen-analysis, pseudo-inverse (directions with no sensitivity are reported, not inverted)
+    std::vector<double> F(size_t(n) * n, 0.0);
+    for (int i = 0; i < m; ++i) for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) F[size_t(a) * n + b] += J[size_t(i) * n + a] * J[size_t(i) * n + b];
+    std::vector<double> w; std::vector<std::vector<double>> V;
+    symEigen(F, n, w, V);
+    double wmax = 0, wmin = 1e300; for (double e : w) { wmax = std::max(wmax, e); wmin = std::min(wmin, e); }
+    S.condition = wmin > 0 ? wmax / wmin : std::numeric_limits<double>::infinity();
+    std::vector<double> Finv(size_t(n) * n, 0.0);
+    for (int k = 0; k < n; ++k) {
+        if (w[size_t(k)] <= 1e-12 * std::max(wmax, 1e-300)) continue;
+        for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) Finv[size_t(a) * n + b] += V[size_t(k)][size_t(a)] * V[size_t(k)][size_t(b)] / w[size_t(k)];
+    }
+    S.cov.assign(size_t(n), std::vector<double>(size_t(n), 0.0)); S.corr = S.cov;
+    for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) S.cov[size_t(a)][size_t(b)] = S.s02 * Finv[size_t(a) * n + b];
+    for (int a = 0; a < n; ++a) {
+        const double sd = std::sqrt(std::max(0.0, S.cov[size_t(a)][size_t(a)]));
+        S.stdDev.push_back(w.empty() || sd == 0 ? std::numeric_limits<double>::infinity() : sd);
+        const StudyParam& P = params[size_t(S.param[size_t(a)])];
+        const double z = 1.96 * S.stdDev.back();
+        S.ci95lo.push_back(std::isfinite(z) ? fromX(P, x[size_t(a)] - z) : (P.log ? 0.0 : -std::numeric_limits<double>::infinity()));
+        S.ci95hi.push_back(std::isfinite(z) ? fromX(P, x[size_t(a)] + z) : std::numeric_limits<double>::infinity());
+    }
+    for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) {
+        const double d = std::sqrt(std::max(0.0, S.cov[size_t(a)][size_t(a)] * S.cov[size_t(b)][size_t(b)]));
+        S.corr[size_t(a)][size_t(b)] = d > 0 ? S.cov[size_t(a)][size_t(b)] / d : (a == b ? 1.0 : 0.0);
+    }
+    // covariance eigenvalues = s0^2 / Fisher eigenvalues; worst-determined direction first
+    std::vector<int> ord(static_cast<size_t>(n)); std::iota(ord.begin(), ord.end(), 0);
+    std::sort(ord.begin(), ord.end(), [&](int a, int b) { return w[size_t(a)] < w[size_t(b)]; });
+    for (int k : ord) { S.eigVal.push_back(w[size_t(k)] > 0 ? S.s02 / w[size_t(k)] : std::numeric_limits<double>::infinity()); S.eigVec.push_back(V[size_t(k)]); }
+    // composite scaled sensitivity (derivative with respect to ln p for log parameters, p * d/dp for linear ones)
+    for (int k = 0; k < n; ++k) {
+        const double scale = S.logSpace[size_t(k)] ? 1.0 / std::log(10.0) : std::fabs(S.value[size_t(k)]);
+        double q = 0; for (int i = 0; i < m; ++i) { const double d = J[size_t(i) * n + k] * scale; q += d * d; }
+        S.css.push_back(std::sqrt(q / m));
+    }
+    // leverage, studentized residuals, prediction standard deviation
+    const double s0 = std::sqrt(S.s02);
+    for (int i = 0; i < m; ++i) {
+        double hii = 0;
+        for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) hii += J[size_t(i) * n + a] * Finv[size_t(a) * n + b] * J[size_t(i) * n + b];
+        hii = std::clamp(hii, 0.0, 0.999999);
+        S.leverage.push_back(hii);
+        const double st = s0 > 0 ? r[size_t(i)] / (s0 * std::sqrt(1.0 - hii)) : 0.0;
+        S.studentized.push_back(st);
+        if (std::fabs(st) > 1.96) S.outliers.push_back(i);
+        S.predStd.push_back(sig[size_t(i)] * s0 * std::sqrt(hii));
+    }
+    // residual moments
+    double mean = 0; for (double v : r) mean += v; mean /= m;
+    double m2 = 0, m3 = 0, m4 = 0;
+    for (double v : r) { const double d = v - mean; m2 += d * d; m3 += d * d * d; m4 += d * d * d * d; }
+    m2 /= m; m3 /= m; m4 /= m;
+    S.resMean = mean; S.resStd = std::sqrt(m2);
+    S.resSkew = m2 > 0 ? m3 / std::pow(m2, 1.5) : 0; S.resKurt = m2 > 0 ? m4 / (m2 * m2) - 3.0 : 0;
+    // objective share per data set
+    std::map<std::string, double> share;
+    for (int i = 0; i < m; ++i) {
+        std::string key = toString(obs[size_t(i)].qty); if (!obs[size_t(i)].well.empty()) key += " " + obs[size_t(i)].well;
+        share[key] += r[size_t(i)] * r[size_t(i)];
+    }
+    for (const auto& e : share) S.contribution.push_back({e.first, ssr > 0 ? 100.0 * e.second / ssr : 0.0});
+    std::sort(S.contribution.begin(), S.contribution.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    // ---- C28 FOSM prediction uncertainty and data worth (Finsterle, iTOUGH2: sigma_z^2 = g^T C_pp g; worth of a data set =
+    // change of sigma_z when its rows are removed from / added to the Fisher matrix). Directions without sensitivity make
+    // a prediction that depends on them unbounded (reported as infinity).
+    auto quadStd = [&](const std::vector<double>& Fm, const std::vector<double>& g) {
+        std::vector<double> we; std::vector<std::vector<double>> Ve;
+        symEigen(Fm, n, we, Ve);
+        double wm = 0; for (double e : we) wm = std::max(wm, e);
+        double gn = 0; for (double v : g) gn += v * v; gn = std::sqrt(gn);
+        double q = 0;
+        for (int k = 0; k < n; ++k) {
+            double pr = 0; for (int a = 0; a < n; ++a) pr += Ve[size_t(k)][size_t(a)] * g[size_t(a)];
+            if (we[size_t(k)] <= 1e-12 * std::max(wm, 1e-300)) { if (std::fabs(pr) > 1e-9 * std::max(gn, 1e-300)) return std::numeric_limits<double>::infinity(); continue; }
+            q += pr * pr / we[size_t(k)];
+        }
+        return std::sqrt(std::max(0.0, S.s02 * q));
+    };
+    std::vector<std::vector<double>> G;   // [prediction][param]
+    for (Response rp : opt.predict) {
+        HMStatistics::Prediction P; P.name = toString(rp);
+        P.value = responseValue(runs[0], cases[0], rp, opt.eco, obs, sig);
+        std::vector<double> g(static_cast<size_t>(n));
+        for (int k = 0; k < n; ++k) g[size_t(k)] = (responseValue(runs[size_t(k) + 1], cases[size_t(k) + 1], rp, opt.eco, obs, sig) - P.value) / h[size_t(k)];
+        P.stdDev = quadStd(F, g); P.lo = P.value - 1.96 * P.stdDev; P.hi = P.value + 1.96 * P.stdDev;
+        S.pred.push_back(P); G.push_back(g);
+    }
+    if (opt.dataWorth && !G.empty()) {
+        auto addRows = [&](std::vector<double>& Fm, const std::vector<double>& rows, int nr, double sign) {
+            for (int i = 0; i < nr; ++i) for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b)
+                Fm[size_t(a) * n + b] += sign * rows[size_t(i) * n + a] * rows[size_t(i) * n + b];
+        };
+        auto pct = [&](const std::vector<double>& Fm, HMStatistics::DataWorth& D) {
+            for (size_t j = 0; j < G.size(); ++j) {
+                const double s1 = quadStd(Fm, G[j]), s0p = S.pred[j].stdDev;
+                D.dStdPct.push_back(!std::isfinite(s1) ? std::numeric_limits<double>::infinity() : s0p > 0 && std::isfinite(s0p) ? 100.0 * (s1 / s0p - 1.0) : 0.0);
+            }
+        };
+        // existing data sets: remove their rows
+        std::map<std::string, std::vector<int>> sets;
+        for (int i = 0; i < m; ++i) { std::string key = toString(obs[size_t(i)].qty); if (!obs[size_t(i)].well.empty()) key += " " + obs[size_t(i)].well; sets[key].push_back(i); }
+        for (const auto& e : sets) {
+            std::vector<double> rows; for (int i : e.second) for (int a = 0; a < n; ++a) rows.push_back(J[size_t(i) * n + a]);
+            std::vector<double> Fm = F; addRows(Fm, rows, int(e.second.size()), -1.0);
+            HMStatistics::DataWorth D; D.set = e.first; D.existing = true; D.points = int(e.second.size()); pct(Fm, D); S.worth.push_back(D);
+        }
+        // candidate data sets: vectors not observed yet, at the observation times (sigma by the automatic rule)
+        std::vector<double> times; for (const auto& o : obs) times.push_back(o.time);
+        std::sort(times.begin(), times.end()); times.erase(std::unique(times.begin(), times.end(), [](double a, double b) { return std::fabs(a - b) < 1e-6; }), times.end());
+        std::vector<std::pair<ObsQty, std::string>> cand;
+        auto observed = [&](ObsQty q, const std::string& w) { for (const auto& o : obs) if (o.qty == q && o.well == w) return true; return false; };
+        for (const auto& w : base.wells) {
+            const bool prod = w.type == WellType::Producer;
+            const std::vector<ObsQty> qs = prod ? std::vector<ObsQty>{ObsQty::WBHP, ObsQty::WWCT, ObsQty::WGOR, ObsQty::WOPR} : std::vector<ObsQty>{ObsQty::WBHP, ObsQty::WWIR};
+            for (ObsQty q : qs) if (!observed(q, w.name)) cand.push_back({q, w.name});
+        }
+        if (!observed(ObsQty::FPR, "")) cand.push_back({ObsQty::FPR, ""});
+        for (const auto& [q, wn] : cand) {
+            std::vector<Observation> pseudo;
+            for (double t : times) { Observation o; o.qty = q; o.well = wn; o.time = t; o.value = simulatedValue(runs[0], cases[0], q, wn, t); if (std::isfinite(o.value)) pseudo.push_back(o); }
+            if (pseudo.empty()) continue;
+            const std::vector<double> sg = autoSigma(pseudo);
+            std::vector<double> rows; int nr = 0; double tot = 0;
+            for (size_t i = 0; i < pseudo.size(); ++i) {
+                std::vector<double> row(static_cast<size_t>(n));
+                bool fin = true;
+                for (int k = 0; k < n; ++k) {
+                    const double yk = simulatedValue(runs[size_t(k) + 1], cases[size_t(k) + 1], q, wn, pseudo[i].time);
+                    row[size_t(k)] = (yk - pseudo[i].value) / h[size_t(k)] / sg[i];
+                    if (!std::isfinite(row[size_t(k)])) fin = false;
+                    tot += std::fabs(row[size_t(k)]);
+                }
+                if (fin) { rows.insert(rows.end(), row.begin(), row.end()); ++nr; }
+            }
+            if (nr == 0 || tot == 0) continue;   // no sensitivity at all (e.g. GOR of a dead-oil case): no worth
+            std::vector<double> Fm = F; addRows(Fm, rows, nr, 1.0);
+            HMStatistics::DataWorth D; D.set = std::string(toString(q)) + (wn.empty() ? "" : " " + wn); D.existing = false; D.points = nr; pct(Fm, D); S.worth.push_back(D);
+        }
+        // most valuable first (by the first prediction): existing sets by increase, candidates by reduction
+        std::stable_sort(S.worth.begin(), S.worth.end(), [](const HMStatistics::DataWorth& a, const HMStatistics::DataWorth& b) {
+            if (a.existing != b.existing) return a.existing;
+            const double va = a.dStdPct.empty() ? 0 : a.dStdPct[0], vb = b.dStdPct.empty() ? 0 : b.dStdPct[0];
+            return a.existing ? va > vb : va < vb;
+        });
+    }
+    S.ok = true;
+    say(cb, f2s("  objective %.5g, s0^2 %.4g, condition number %.3g", S.objective, S.s02, S.condition));
+    for (const auto& P : S.pred) say(cb, "  prediction " + P.name + f2s(" = %.6g +- %.4g (1 sd, FOSM)", P.value, P.stdDev));
+    return S;
 }
 
 } // namespace ressim

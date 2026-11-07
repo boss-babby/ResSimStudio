@@ -1,0 +1,22 @@
+CONST u=1: RSF total 32 (2.00 per realisation)
+TRAIN  0 [1.23 1.68 0.03 1.07] RSF 48
+TRAIN  1 [1.00 1.25 0.80 0.95] RSF 32
+TRAIN  2 [1.16 1.52 1.11 0.21] RSF 48
+TRAIN  3 [0.21 1.47 0.86 1.46] RSF 48
+TRAIN  4 [0.97 0.87 0.98 1.18] RSF 33
+TRAIN  5 [1.08 2.40 0.30 0.23] RSF 65
+TRAIN  6 [0.16 1.16 0.49 2.19] RSF 64
+TRAIN  7 [1.30 0.89 0.77 1.05] RSF 32
+TRAIN  8 [0.84 1.15 0.27 1.74] RSF 48
+TRAIN  9 [1.51 1.44 0.61 0.45] RSF 48
+TRAIN 10 [0.70 1.01 1.69 0.60] RSF 48
+TRAIN 11 [1.71 0.70 0.07 1.53] RSF 48
+FIT A_sigma 1.517e+05 Pa  tau_dot 0.0002166 Pa/s (t_a 8.1e+03 d)  scale 0.02725  deviance 1.693 (12 schedules)
+FIT R2 on training 0.940
+SURROGATE optimum [1.12 1.01 0.95 0.92] predicted 29.1, RSF 32 (13 RSF evaluations incl. training)
+ES seed 0 best RSF 32 at [0.52 1.27 1.05 1.16] (60 evaluations)
+ES seed 1 best RSF 32 at [1.46 1.09 0.50 0.95] (60 evaluations)
+ES seed 2 best RSF 32 at [0.44 1.40 1.24 0.92] (60 evaluations)
+SUMMARY const 32 | surrogate 32 (13 evals) | ES median best 32 (60 evals x 3 seeds) | ratio 1.000 | RSF calls 194, 1353 s
+VERDICT SUPPORTED (<= 1.05)
+H9DONE

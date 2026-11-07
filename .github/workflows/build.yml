@@ -1,0 +1,40 @@
+# C39 continuous integration: native Linux + macOS builds (OpenGL back end), Windows MinGW cross build (Direct3D 11
+# back end) and the engine regression tests.
+name: build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libglfw3-dev libgl-dev xvfb libgl1-mesa-dri
+      - name: build
+        run: JOBS=4 AVX2=OFF ./build_linux.sh
+      - name: engine tests
+        run: OMP_NUM_THREADS=2 ./build/linux/ressim_tests -mr
+      - name: UI smoke test (software OpenGL)
+        run: |
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 20 xvfb-run -a -s "-screen 0 1600x960x24" ./build/linux/ResSimStudio --smoke-test || test $? -eq 124
+      - uses: actions/upload-artifact@v4
+        with: { name: ResSimStudio-linux, path: "build/linux/ResSimStudio\nbuild/linux/ResSimCLI" }
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: brew install cmake glfw libomp
+      - name: build
+        run: JOBS=3 ./build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: ResSimStudio-macos, path: build/linux/ResSimStudio }
+  windows-mingw:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix
+      - name: build
+        run: JOBS=4 ./build_mingw.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: ResSimStudio-windows, path: "build/mingw/*.exe\nbuild/mingw/*.dll" }

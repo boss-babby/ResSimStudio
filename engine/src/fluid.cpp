@@ -1,4 +1,5 @@
 #include "ressim/fluid.h"
+#include <array>
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -40,12 +41,40 @@ double Table1D::inverse(double yv) const {
     return yv > y.front() ? x.front() : x.back();
 }
 
+// ------------------------------------------------------------------ C47: low-pressure padding of gas tables
+// OPM Flow (opm-common PR 3779, Tables.cpp LowPressureTablePadding, in OPM since 2025-02): when the linear extrapolation of
+// b = 1/Bg from the first two (saturated) rows gives b(1 bar) < 1/B_lim (B_lim = max(10 Bg0, 1)) - or a negative b at
+// p = 0 - rows are inserted below the table: the "limiting" pressure p_lim where b = 1/B_lim (Rv and 1/(Bg mu) linear in
+// p there) and, if 1 bar < p_lim, a row at 1 bar with 1.1 B_lim. In the zero-pressure branch one row (0, Rv0, 1.1 Bg0, mu0).
+// Matters for low-pressure evaluations: well potentials / productivity with defaulted BHP limits (1 atm), guide rates.
+// rows: {p, rv, B, mu} to insert before the first table row (empty: no padding). p1 = 1 bar in case pressure units.
+static std::vector<std::array<double, 4>> gasLowPressurePadding(double p0, double p1, double B0, double B1, double mu0, double mu1,
+                                                               double rv0, double rv1, double p1bar) {
+    std::vector<std::array<double, 4>> rows;
+    if (!(p1 > p0) || !(B0 > 0) || !(B1 > 0) || !(mu0 > 0) || !(mu1 > 0)) return rows;
+    auto lin = [](double x0, double x1, double y0, double y1, double x) { const double t = (x - x0) / (x1 - x0); return (1 - t) * y0 + t * y1; };
+    const double b0 = 1 / B0, b1 = 1 / B1, rb0 = b0 / mu0, rb1 = b1 / mu1;
+    double fvf = std::max(10.0 / b0, 1.0);
+    double pl = (b1 != b0) ? lin(b0, b1, p0, p1, 1.0 / fvf) : -1e300;
+    double rvl = lin(p0, p1, rv0, rv1, pl), mul = 1.0 / (fvf * lin(p0, p1, rb0, rb1, pl));
+    bool need = p0 > p1bar && lin(p0, p1, b0, b1, p1bar) < 1.0 / fvf;
+    if (!need) {
+        need = p0 > 0 && lin(p0, p1, b0, b1, 0.0) < 0.0;
+        if (need) { fvf = 1.1 * B0; pl = 0; rvl = rv0; mul = mu0; }
+    }
+    if (!need || !(pl < p0) || !std::isfinite(pl) || !(mul > 0) || !std::isfinite(mul)) return rows;
+    if (p1bar < pl) rows.push_back({p1bar, rvl, 1.1 * fvf, mul});
+    rows.push_back({pl, rvl, fvf, mul});
+    return rows;
+}
+
 // ------------------------------------------------------------------ FluidModel
 void FluidModel::setup(const Case& c, int region) {
     const PvtRegion PR = c.props.pvtRegion(region);
     pvtw_ = PR.pvtw; rock_ = PR.rock; rho_ = PR.density;
     gasFactor_ = Units::of(c.units).gasDensity;
     live_ = c.phases.oil && c.phases.gas && c.phases.disgas;
+    gasPadRows_ = 0;
 
     if (c.phases.oil && !live_) {
         if (PR.pvdo.size() < 2) throw std::runtime_error("PVDO needs at least 2 rows");
@@ -56,7 +85,14 @@ void FluidModel::setup(const Case& c, int region) {
     if (c.phases.gas && !(c.phases.oil && c.phases.vapoil)) {
         if (PR.pvdg.size() < 2) throw std::runtime_error("PVDG needs at least 2 rows");
         gasB_ = {}; gasBMu_ = {};
-        for (auto& r : PR.pvdg) { gasB_.x.push_back(r.p); gasB_.y.push_back(1.0 / r.B);
+        auto tab = PR.pvdg;
+        std::sort(tab.begin(), tab.end(), [](const auto& a, const auto& b) { return a.p < b.p; });
+        const double p1bar = c.units == UnitSystem::Field ? 14.503773773 : 1.0;
+        for (const auto& q : gasLowPressurePadding(tab[0].p, tab[1].p, tab[0].B, tab[1].B, tab[0].mu, tab[1].mu, 0, 0, p1bar)) {
+            gasB_.x.push_back(q[0]); gasB_.y.push_back(1.0 / q[2]); gasBMu_.x.push_back(q[0]); gasBMu_.y.push_back(1.0 / (q[2] * q[3]));
+        }
+        gasPadRows_ = int(gasB_.x.size());
+        for (auto& r : tab) { gasB_.x.push_back(r.p); gasB_.y.push_back(1.0 / r.B);
                                        gasBMu_.x.push_back(r.p); gasBMu_.y.push_back(1.0 / (r.B * r.mu)); }
     }
     vap_ = c.phases.oil && c.phases.gas && c.phases.vapoil;
@@ -67,6 +103,15 @@ void FluidModel::setup(const Case& c, int region) {
         auto t = PR.pvtg;
         if (t.size() < 2) throw std::runtime_error("PVTG needs at least 2 pressure records (VAPOIL)");
         std::sort(t.begin(), t.end(), [](const PVTGRecord& a, const PVTGRecord& b) { return a.pg < b.pg; });
+        if (!t[0].rows.empty() && !t[1].rows.empty()) {   // C47: OPM low-pressure padding (saturated-only records)
+            const double p1bar = c.units == UnitSystem::Field ? 14.503773773 : 1.0;
+            const auto pad = gasLowPressurePadding(t[0].pg, t[1].pg, t[0].rows[0].B, t[1].rows[0].B, t[0].rows[0].mu, t[1].rows[0].mu,
+                                                   t[0].rows[0].rv, t[1].rows[0].rv, p1bar);
+            std::vector<PVTGRecord> padRec;
+            for (const auto& q : pad) { PVTGRecord R; R.pg = q[0]; R.rows.push_back({q[1], q[2], q[3]}); padRec.push_back(R); }
+            t.insert(t.begin(), padRec.begin(), padRec.end());
+            gasPadRows_ = int(padRec.size());
+        }
         const int n = int(t.size());
         pg_.clear(); rvMax_.clear(); gB_.assign(size_t(n), {}); gMu_.assign(size_t(n), {}); rvOfP_ = {};
         for (int k = 0; k < n; ++k) {
@@ -243,6 +288,7 @@ void SatFunctions::setup(const Case& c, int region) {
     water_ = c.phases.water && c.phases.oil;
     gas_ = c.phases.gas && c.phases.oil;
     kroModel_ = c.props.kroModel; stoneEta_ = c.props.stone1Exp > 0 ? c.props.stone1Exp : 1.0;
+    threePt_ = c.grid.scalecrs && c.grid.endscale;
     auto mk = [](const std::vector<SatRow>& t, int col) {
         Table1D tb; tb.clampEnds = true;
         for (auto& r : t) { tb.x.push_back(r.s); tb.y.push_back(col == 0 ? r.krw : col == 1 ? r.kro : r.pc); }
@@ -289,13 +335,62 @@ inline double mapBack(double st, double a, double b, double at, double bt) {   /
     return a + (st - at) * ((b - a) / (bt - at));
 }
 }
+namespace {
+// three-point scaling (SCALECRS): [critical, displacing-phase residual, maximum] of the cell -> the table's,
+// piecewise linear (ECLIPSE / OPM EclEpsScalingPoints). Degenerate middle points fall back to two-point scaling.
+// No two-point fallback: a table whose middle point equals its maximum (e.g. SOWCR_t = 0 -> SR_t = SWU_t, Norne)
+// maps [critical, SR] of the cell onto [critical_t, max_t] and stays at the maximum above SR - exactly as
+// OPM EclEpsTwoPhaseLaw::scaledToUnscaledSatThreePoint_ (ECLIPSE three-point scaling).
+inline AD3 map3(const AD3& s, double a, double m, double b, double at, double mt, double bt) {
+    auto seg = [&](double lo, double hi, double ulo, double uhi) {
+        if (!(hi - lo > 1e-12)) return AD3(uhi);
+        AD3 r = ulo + (s - lo) * (std::max(uhi - ulo, 0.0) / (hi - lo));
+        return r.v > uhi ? AD3(uhi) : r;
+    };
+    if (!(s.v > a)) return AD3(at);
+    if (s.v < std::min(m, b)) return seg(a, m, at, mt);
+    if (s.v < b) return seg(m, b, mt, bt);
+    return AD3(bt);
+}
+}
 AD3 SatFunctions::krw(const AD3& sw, const EndPoints* e) const {
     if (!e) return krw_(sw);
+    if (threePt_) return krw_(map3(sw, e->swcr, 1.0 - e->sowcr - e->sgl, e->swu, ep_.swcr, 1.0 - ep_.sowcr - ep_.sgl, ep_.swu));
     return krw_(mapLin(sw, e->swcr, e->swu, ep_.swcr, ep_.swu));
 }
 AD3 SatFunctions::krg(const AD3& sg, const EndPoints* e) const {
     if (!e) return krg_(sg);
+    if (threePt_) return krg_(map3(sg, e->sgcr, 1.0 - e->sogcr - e->swl, e->sgu, ep_.sgcr, 1.0 - ep_.sogcr - ep_.swl, ep_.sgu));
     return krg_(mapLin(sg, e->sgcr, e->sgu, ep_.sgcr, ep_.sgu));
+}
+AD3 SatFunctions::krowAtSo(const AD3& so, const EndPoints* e) const {
+    if (!e) return krow_(1.0 - so);
+    const AD3 soT = threePt_ ? map3(so, e->sowcr, 1.0 - e->swcr - e->sgl, 1.0 - e->swl - e->sgl,
+                                    ep_.sowcr, 1.0 - ep_.swcr - ep_.sgl, 1.0 - ep_.swl - ep_.sgl)
+                             : mapLin(so, e->sowcr, 1.0 - e->swl, ep_.sowcr, 1.0 - ep_.swl);
+    return krow_(1.0 - soT);
+}
+AD3 SatFunctions::krogAtSo(const AD3& so, const EndPoints* e) const {
+    if (!e) return krog_(1.0 - swco_ - so);
+    const AD3 soT = threePt_ ? map3(so, e->sogcr, 1.0 - e->sgcr - e->swl, 1.0 - e->swl - e->sgl,
+                                    ep_.sogcr, 1.0 - ep_.sgcr - ep_.swl, 1.0 - ep_.swl - ep_.sgl)
+                             : mapLin(so, e->sogcr, 1.0 - e->swl - e->sgl, ep_.sogcr, 1.0 - ep_.swl - ep_.sgl);
+    return krog_(1.0 - ep_.swl - soT);
+}
+AD3 SatFunctions::kroCombine(const AD3& sw, const AD3& sg, const AD3& krow, const AD3& krog, const EndPoints* e) const {
+    if (water_ && !gas_) return krow;
+    if (!water_ && gas_) return krog;
+    if (!water_ && !gas_) return AD3(1.0);
+    const double swl = e ? e->swl : swco_;
+    if (kroModel_ != 0) {
+        const AD3 krocw = krowAtSo(AD3(1.0 - swl), e);
+        return stone(sw, sg, krow, krog, e ? krw(sw, e) : krw_(sw), e ? krg(sg, e) : krg_(sg), krocw.v, swl);
+    }
+    AD3 dw = sw - swl;
+    if (dw.v < 0) dw = AD3(0.0);
+    const AD3 den = sg + dw;
+    if (den.v < 1e-9) return krow;
+    return (sg * krog + dw * krow) / den;
 }
 AD3 SatFunctions::pcow(const AD3& sw, const EndPoints* e) const {
     if (!e) return pcow_(sw);
@@ -308,16 +403,10 @@ AD3 SatFunctions::pcog(const AD3& sg, const EndPoints* e) const {
 AD3 SatFunctions::kro(const AD3& sw, const AD3& sg, const EndPoints* e) const {
     if (!e) return kro(sw, sg);
     const AD3 so = 1.0 - sw - sg;
-    // krow(So): So in [SOWCR, 1 - SWL] -> table range; evaluated at Sw' = 1 - So'
-    auto krowS = [&](const AD3& soIn) {
-        const AD3 soT = mapLin(soIn, e->sowcr, 1.0 - e->swl, ep_.sowcr, 1.0 - ep_.swl);
-        return krow_(1.0 - soT);
-    };
+    // krow(So): So in [SOWCR, 1 - SWL] -> table range; evaluated at Sw' = 1 - So'  (three-point with SCALECRS)
+    auto krowS = [&](const AD3& soIn) { return krowAtSo(soIn, e); };
     // krog(So): So in [SOGCR, 1 - SWL - SGL] -> table range; evaluated at Sg' = 1 - SWL_t - So'
-    auto krogS = [&](const AD3& soIn) {
-        const AD3 soT = mapLin(soIn, e->sogcr, 1.0 - e->swl - e->sgl, ep_.sogcr, 1.0 - ep_.swl - ep_.sgl);
-        return krog_(1.0 - ep_.swl - soT);
-    };
+    auto krogS = [&](const AD3& soIn) { return krogAtSo(soIn, e); };
     if (water_ && !gas_) return krowS(so);
     if (!water_ && gas_) return krogS(so);
     if (!water_ && !gas_) return AD3(1.0);

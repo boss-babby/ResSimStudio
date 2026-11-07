@@ -2,6 +2,7 @@
 // figure export window (journal size presets, typography, palettes, editable labels, live WYSIWYG preview,
 // vector PDF / SVG, high-resolution PNG and CSV data).
 #include "app.h"
+#include "i18n.h"
 #include "icons.h"
 #include <cfloat>
 #include "figure.h"
@@ -80,6 +81,7 @@ public:
         for (size_t i = 0; i < sIn.size(); ++i) {
             if (sIn[i] == '^' && i + 1 < sIn.size() && sIn[i + 1] == '{') { s += '^'; ++i; continue; }
             if (sIn[i] == '}') continue;
+            if (sIn.compare(i, 3, "\xE2\x88\x92") == 0) { s += '-'; i += 2; continue; }   // U+2212 is not in the UI font
             s += sIn[i];
         }
         ImFont* f = g_fonts.ui ? g_fonts.ui : ImGui::GetFont();
@@ -102,6 +104,31 @@ public:
             ImVec2& p = dl_->VtxBuffer[i].pos;
             const float dx = p.x - at.x, dy = p.y - at.y;
             p = ImVec2(at.x + dy, at.y - dx);
+        }
+    }
+    void fillTriangles(const double* xy, int nTri, uint32_t color) override {
+        if (nTri <= 0 || (color >> 24) == 0) return;
+        const ImVec2 uv = dl_->_Data->TexUvWhitePixel;
+        dl_->PrimReserve(3 * nTri, 3 * nTri);
+        for (int t = 0; t < nTri; ++t) {
+            const ImDrawIdx base = ImDrawIdx(dl_->_VtxCurrentIdx);
+            for (int k = 0; k < 3; ++k) dl_->PrimWriteVtx(P(xy[6 * t + 2 * k], xy[6 * t + 2 * k + 1]), uv, color);
+            dl_->PrimWriteIdx(base); dl_->PrimWriteIdx(ImDrawIdx(base + 1)); dl_->PrimWriteIdx(ImDrawIdx(base + 2));
+        }
+    }
+    void textFit(double x, double y, const std::string& s, double sizePt, double widthPt, bool vertical, uint32_t color) override {
+        ImFont* f = g_fonts.ui ? g_fonts.ui : ImGui::GetFont();
+        const float px = std::max(1.0f, float(sizePt) * s_);
+        const float wpx = f->CalcTextSizeA(px, FLT_MAX, 0, s.c_str()).x, want = float(widthPt) * s_;
+        const float sx = (wpx > 0 && want > 0) ? std::clamp(want / wpx, 0.5f, 2.0f) : 1.0f;
+        const float asc = f->GetFontBaked(px)->Ascent;
+        const ImVec2 at = P(x, y);
+        const int v0 = dl_->VtxBuffer.Size;
+        dl_->AddText(f, px, ImVec2(at.x, at.y - asc), color, s.c_str());
+        for (int i = v0; i < dl_->VtxBuffer.Size; ++i) {
+            ImVec2& p = dl_->VtxBuffer[i].pos;
+            const float dx = (p.x - at.x) * sx, dy = p.y - at.y;
+            p = vertical ? ImVec2(at.x + dy, at.y - dx) : ImVec2(at.x + dx, at.y + dy);
         }
     }
     void pushClip(double x, double y, double w, double h) override { dl_->PushClipRect(P(x, y), P(x + w, y + h), true); }
@@ -135,13 +162,15 @@ ImVec4 toV4(uint32_t c) { return ImGui::ColorConvertU32ToFloat4(c); }
 void App::workspaceSwitch() {
     struct Item { const char* label; Workspace w; const char* tip; };
     static const Item items[] = {
-        {ICON_BOX " Model", Workspace::Model, "Model workspace: inputs, 3D viewer, run monitor (Ctrl+1)"},
-        {ICON_FILE_CODE " Deck Editor", Workspace::DeckEditor, "Deck Editor - writing mode: intelligent ECLIPSE / OPM deck editing (Ctrl+2)"},
-        {ICON_CHART_LINE " Results", Workspace::Results, "Results workspace: run dashboard, cases, vectors, compare, 3D, figure export (Ctrl+3)"},
-        {ICON_FLASK_CONICAL " Studies", Workspace::Studies, "Studies workspace: sensitivity, uncertainty, history matching, proxy models (Ctrl+4)"},
+        {TRN(ICON_BOX " Model"), Workspace::Model, TRN("Model workspace: inputs, 3D viewer, run monitor (Ctrl+1)")},
+        {TRN(ICON_FILE_CODE " Deck Editor"), Workspace::DeckEditor, TRN("Deck Editor - writing mode: intelligent ECLIPSE / OPM deck editing (Ctrl+2)")},
+        {TRN(ICON_CHART_LINE " Results"), Workspace::Results, TRN("Results workspace: run dashboard, cases, vectors, compare, 3D, figure export (Ctrl+3)")},
+        {TRN(ICON_FLASK_CONICAL " Studies"), Workspace::Studies, TRN("Studies workspace: sensitivity, uncertainty, history matching, proxy models (Ctrl+4)")},
+        {TRN(ICON_MOUNTAIN " Geomodel"), Workspace::Geomodel, TRN("Geomodel workspace (ResGeo): wells / surfaces / faults / SEG-Y -> structural grid -> facies -> petrophysics -> volumetrics -> upscaling -> simulation case (Ctrl+5)")},
     };
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(1, ImGui::GetStyle().ItemSpacing.y));
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
+        if (geoMode_ && items[i].w != Workspace::Geomodel) continue;   // ResGeo shows the geomodelling workspace only
         const bool on = workspace_ == items[i].w;
         if (i) ImGui::SameLine();
         if (on) {
@@ -149,9 +178,9 @@ void App::workspaceSwitch() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colA(Pal::Accent, 0.95f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
         }
-        if (ImGui::Button(items[i].label)) workspace_ = items[i].w;
+        if (ImGui::Button(TR(items[i].label))) workspace_ = items[i].w;
         if (on) ImGui::PopStyleColor(3);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", items[i].tip);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", TR(items[i].tip));
     }
     ImGui::PopStyleVar();
 }
@@ -169,16 +198,16 @@ void App::resultsWorkspace() {
     const float fs = ImGui::GetFontSize();
 
     // ---- header: sections + plot style
-    static const char* tabs[] = {"Run dashboard", "Cases, vectors & compare"};
+    static const char* tabs[] = {TRN("Run dashboard"), TRN("Cases, vectors & compare")};
     for (int i = 0; i < 2; ++i) {
         if (i) ImGui::SameLine();
         const bool on = resultsTab_ == i;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, colA(Pal::Accent, 0.55f));
-        if (ImGui::Button(tabs[i])) resultsTab_ = i;
+        if (ImGui::Button(TRL(tabs[i]))) resultsTab_ = i;
         if (on) ImGui::PopStyleColor();
     }
     ImGui::SameLine(0, fs * 1.5f);
-    ImGui::TextDisabled("Curve palette");
+    ImGui::TextDisabled("%s", TR("Curve palette"));
     ImGui::SameLine();
     ImGui::SetNextItemWidth(fs * 9);
     const auto& P = fig::palettes();
@@ -199,7 +228,7 @@ void App::resultsWorkspace() {
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Line width");
+    ImGui::TextDisabled("%s", TR("Line width"));
     ImGui::SameLine();
     ImGui::SetNextItemWidth(fs * 6);
     ImGui::SliderFloat("##lw", &g_plotLineScale, 0.5f, 3.0f, "%.1fx");
@@ -230,6 +259,9 @@ void App::exportButton(const char* figId) {
             figx_.id = figId;
             figx_.open = true;
             figx_.cols = 0;
+            figx_.plotId = 0;
+            figx_.snapWait = false;
+            figx_.snapTried = false;
             if (figx_.preset > 0) {
                 const SizePreset& p = kPresets[figx_.preset];
                 figx_.style.widthMM = p.w; figx_.style.heightMM = p.h; figx_.style.fontPt = p.font; figx_.style.lineWidthPt = p.line;
@@ -249,17 +281,68 @@ void App::figureExportWindow() {
     if (!figx_.open) return;
     const float fs = ImGui::GetFontSize();
     ImGui::SetNextWindowSize(ImVec2(fs * 66, fs * 40), ImGuiCond_FirstUseEver);
+    if (figDeferredFocus_) { ImGui::SetNextWindowFocus(); figDeferredFocus_ = false; }
     if (!ImGui::Begin("Export figure", &figx_.open, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
     fig::Style& st = figx_.style;
     fig::Figure& F0 = figx_.fig;
 
     // working copy with the layout override
-    fig::Figure F = F0;
+    fig::Figure F;   // (without the snapshot - exact mode draws F0 directly, no per-frame copy of the geometry)
+    F.name = F0.name; F.panels = F0.panels; F.rows = F0.rows; F.cols = F0.cols;
     const int n = int(F.panels.size());
     if (figx_.cols > 0 && n > 0) { F.cols = std::min(figx_.cols, n); F.rows = (n + F.cols - 1) / F.cols; }
 
+    // C22: exact snapshot of a recorded (dashboard) figure - requested on demand, arrives one frame later
+    auto requestSnap = [this]() {
+        if (figx_.id.empty()) return;
+        figx_.snapWait = true;
+        requestFigureSnapshot(figx_.id, [this](const std::string& id, const fig::Snapshot& sn) {
+            if (id != figx_.id) return;
+            figx_.snapWait = false;
+            figx_.snapTried = true;
+            figx_.fig.snap = sn;
+        });
+    };
+    if (st.exact && F0.snap.empty() && !figx_.id.empty() && !figx_.snapWait && !figx_.snapTried) requestSnap();
+    const bool exact = st.exact && !F0.snap.empty();
+    if (exact) {   // the page has the on-screen aspect ratio
+        st.heightMM = std::clamp(st.widthMM * F0.snap.aspect(), 10.0, 900.0);
+        const double pxW = F0.snap.x1 - F0.snap.x0;
+        if (figx_.pxScale > 0 && pxW > 0) st.dpi = std::clamp(int(std::lround(figx_.pxScale * pxW / (st.widthMM / 25.4))), 72, 2400);
+    }
+
     ImGui::BeginChild("##figset", ImVec2(fs * 21, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
     ImGui::PushItemWidth(-fs * 6.5f);
+    ImGui::SeparatorText("Mode");
+    {
+        int mode = st.exact ? 0 : 1;
+        if (ImGui::RadioButton("Publication (journal style)", &mode, 1)) st.exact = false;
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("Re-drawn natively with journal fonts, line widths, palettes, ticks and legends - including heatmaps / cell maps\n"
+                              "with a colour bar, model-cell outlines, filled bands, bars, fractures, wells, outlines and labels (C23).\n"
+                              "Light lines and text made for the dark screen theme print dark on paper.");
+        if (ImGui::RadioButton("Exact (as on screen)", &mode, 0)) { st.exact = true; figx_.snapTried = false; }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("A copy of the plot exactly as the board shows it (screen fonts and theme): grid, cell backgrounds, markers,\n"
+                              "legend, axes and colour scale as vector geometry (PDF / SVG) or a sharp raster (PNG).");
+        if (st.exact) {
+            if (figx_.snapWait) ImGui::TextColored(ImVec4(0.9f, 0.75f, 0.3f, 1), "Capturing the plots from the screen...");
+            else if (F0.snap.empty()) {
+                ImGui::TextWrapped("No on-screen snapshot yet: the plots must be visible. Show them and press Capture.");
+            } else {
+                ImGui::TextDisabled("%d plot(s), %.0f x %.0f px, %d text items", std::max(1, F0.snap.plots), F0.snap.x1 - F0.snap.x0,
+                                    F0.snap.y1 - F0.snap.y0, int(F0.snap.texts.size()));
+            }
+            if (ImGui::SmallButton(F0.snap.empty() ? "Capture from screen" : "Re-capture from screen")) {
+                if (!figx_.id.empty()) { figx_.snapTried = false; requestSnap(); }
+                else if (figx_.plotId) recapturePlot(figx_.plotId);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Take the plots again as they are now on the board (zoom, colours, markers)");
+            ImGui::Checkbox("Print colours (light background)", &st.printColors);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                ImGui::SetTooltip("Inverts the neutral greys of the dark theme (background, text, grid) - series and colour maps keep their colours");
+        }
+    }
     ImGui::SeparatorText("Size");
     if (ImGui::BeginCombo("Preset", kPresets[figx_.preset].name)) {
         for (int i = 0; i < kNumPresets; ++i)
@@ -270,12 +353,16 @@ void App::figureExportWindow() {
         ImGui::EndCombo();
     }
     if (ImGui::InputDouble("Width (mm)", &st.widthMM, 1, 10, "%.0f")) figx_.preset = 0;
+    ImGui::BeginDisabled(exact);
     if (ImGui::InputDouble("Height (mm)", &st.heightMM, 1, 10, "%.0f")) figx_.preset = 0;
+    ImGui::EndDisabled();
+    if (exact && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Exact mode keeps the on-screen aspect ratio");
     st.widthMM = std::clamp(st.widthMM, 30.0, 600.0);
     st.heightMM = std::clamp(st.heightMM, 20.0, 600.0);
     int cols = figx_.cols;
     if (n > 1 && ImGui::SliderInt("Columns", &cols, 0, std::min(n, 6), cols == 0 ? "as in app" : "%d")) figx_.cols = cols;
 
+    ImGui::BeginDisabled(exact);   // the publication-layout settings do not apply to an exact snapshot
     ImGui::SeparatorText("Typography & lines");
     static const char* fonts[] = {"Helvetica / Arial (sans)", "Times (serif)"};
     ImGui::Combo("Font", &st.font, fonts, 2);
@@ -300,19 +387,33 @@ void App::figureExportWindow() {
     ImGui::Checkbox("Box", &st.box);
     ImGui::SameLine(); ImGui::Checkbox("Panel titles", &st.titles);
     ImGui::Checkbox("Use visible axis ranges", &st.useLimits);
+    ImGui::Checkbox("Maps, cells & markers", &st.layers);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        ImGui::SetTooltip("Heatmaps / cell maps with a colour bar, filled bands, bars, fractures, wells, outlines and text labels");
+    ImGui::SameLine(); ImGui::Checkbox("Cell outlines", &st.cellEdges);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Thin outlines around every heatmap cell (the model grid)");
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("On: the zoom of the app plots. Off: fit all data with nice round limits.");
 
+    ImGui::EndDisabled();
     ImGui::SeparatorText("Raster (PNG)");
     static const int dpis[] = {150, 300, 600, 1200};
+    if (exact) {
+        static const char* sc[] = {"Use dpi below", "1x screen pixels", "2x screen pixels", "3x", "4x"};
+        ImGui::Combo("Pixel scale", &figx_.pxScale, sc, 5);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("1x = the same number of pixels as on screen; 2x-4x = sharper copies of the same picture");
+    }
     int di = 2;
     for (int i = 0; i < 4; ++i) if (st.dpi == dpis[i]) di = i;
     static const char* dpiNames[] = {"150 dpi (screen)", "300 dpi (print)", "600 dpi (line art)", "1200 dpi"};
+    ImGui::BeginDisabled(exact && figx_.pxScale > 0);
     if (ImGui::Combo("Resolution", &di, dpiNames, 4)) st.dpi = dpis[di];
+    ImGui::EndDisabled();
     ImGui::Checkbox("Transparent background", &st.transparent);
     ImGui::TextDisabled("%d x %d px", int(st.widthMM / 25.4 * st.dpi + 0.5), int(st.heightMM / 25.4 * st.dpi + 0.5));
     ImGui::PopItemWidth();
 
     ImGui::SeparatorText("Labels");
+    if (exact) ImGui::TextDisabled("(label edits apply to the re-drawn mode)");
     for (int i = 0; i < int(F0.panels.size()); ++i) {
         fig::Panel& p = F0.panels[size_t(i)];
         ImGui::PushID(i);
@@ -346,9 +447,11 @@ void App::figureExportWindow() {
         }
         ImGui::PopID();
     }
+    ImGui::BeginDisabled(figx_.id.empty());
     if (ImGui::SmallButton("Reload from plots")) {
-        if (const fig::Figure* f = fig::recorder().get(figx_.id)) figx_.fig = *f;
+        if (const fig::Figure* f = fig::recorder().get(figx_.id)) { figx_.fig = *f; figx_.snapTried = false; }
     }
+    ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Take the current state of the app plots again (discards label edits)");
     ImGui::EndChild();
 
@@ -367,9 +470,10 @@ void App::figureExportWindow() {
         if (sl != std::string::npos) figx_.lastDir = path.substr(0, sl);
         std::string err;
         bool ok = false;
-        if (kind == 0) ok = fig::writePDF(F, st, path, &err);
-        else if (kind == 1) ok = fig::writeSVG(F, st, path, &err);
-        else if (kind == 2) ok = fig::writePNG(F, st, path, &err);
+        const fig::Figure& FX = exact ? F0 : F;
+        if (kind == 0) ok = fig::writePDF(FX, st, path, &err);
+        else if (kind == 1) ok = fig::writeSVG(FX, st, path, &err);
+        else if (kind == 2) ok = fig::writePNG(FX, st, path, &err);
         else ok = fig::writeCSV(F, path, &err);
         notify(ok ? "Figure exported: " + path : "Export failed: " + err);
     };
@@ -381,7 +485,8 @@ void App::figureExportWindow() {
     ImGui::SameLine();
     if (ImGui::Button("CSV data...")) save(3);
     ImGui::SameLine();
-    ImGui::TextDisabled("  %.0f x %.0f mm, %d panel(s)", st.widthMM, st.heightMM, n);
+    if (exact) ImGui::TextDisabled("  %.0f x %.0f mm, exact, PNG %d x %d px", st.widthMM, st.heightMM, int(st.widthMM / 25.4 * st.dpi + 0.5), int(st.heightMM / 25.4 * st.dpi + 0.5));
+    else ImGui::TextDisabled("  %.0f x %.0f mm, %d panel(s)", st.widthMM, st.heightMM, n);
 
     const ImVec2 av = ImGui::GetContentRegionAvail();
     ImGui::BeginChild("##figprev", av, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
@@ -397,7 +502,7 @@ void App::figureExportWindow() {
             dl->AddRectFilled(ImVec2(o.x + 4, o.y + 4), ImVec2(o.x + float(wPt) * sc + 4, o.y + float(hPt) * sc + 4), IM_COL32(0, 0, 0, 90));
             dl->PushClipRect(o, ImVec2(o.x + float(wPt) * sc, o.y + float(hPt) * sc), true);
             DrawListCanvas cv(dl, o, sc);
-            fig::render(F, st, cv);
+            fig::render(exact ? F0 : F, st, cv);
             dl->PopClipRect();
         }
         ImGui::Dummy(av);

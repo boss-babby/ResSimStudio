@@ -67,6 +67,7 @@ Simulator::PolyEval Simulator::polyEval(int a, double c) const {
     // adsorption
     double da = 0; double ca = tab(ads, std::max(c, 0.0), &da);
     if (c < 0) da = 0;
+    if (!polyAdsMul_.empty()) { const double m = polyAdsMul_[size_t(a)]; ca *= m; da *= m; }   // C35 ALPOLADS (alkaline)
     if (R.adsIndex == 2 && !pcAdsMax_.empty() && pcAdsMax_[size_t(a)] > ca) { ca = pcAdsMax_[size_t(a)]; da = 0; }
     e.ads = ca; e.dads = da;
     e.rk = R.maxAdsorption > 0 ? 1.0 + (R.rrf - 1.0) * ca / R.maxAdsorption : 1.0;
@@ -79,7 +80,7 @@ double Simulator::polyMass(int a, double c, double* dM) const {
     const PolymerRock& R = P.plyrock[std::min(size_t(satReg_[size_t(a)]), P.plyrock.size() - 1)];
     const double wat = cf_[size_t(a)].acc[PW].v;                    // PV(p) * bw * Sw  (surface water volume)
     const double pv = fl(a).pvMult(p_[size_t(a)]) * grid_.poreVolRef[size_t(a)];
-    const double rockVol = std::max(0.0, grid_.bulkVol[size_t(grid_.globalOf[size_t(a)])] - pv);
+    const double rockVol = std::max(0.0, grid_.bulkVol[size_t(grid_.globalOf[size_t(a)])] - pv / U_.poreVolume);   // ft3 | m3 (PLYROCK density)
     const PolyEval e = polyEval(a, c);
     const double m = std::max(wat, 1e-10 * pv) * c * (1.0 - R.deadPoreVolume) + rockVol * R.rockDensity * e.ads;
     if (dM) *dM = std::max(wat, 1e-10 * pv) * (1.0 - R.deadPoreVolume) + rockVol * R.rockDensity * e.dads;
@@ -277,7 +278,7 @@ double Simulator::polymerTransport(double dt) {
             const WellRT& W = wells_[w];
             if (!W.open) continue;
             for (size_t k = 0; k < W.cell.size() && k < W.qwConn.size(); ++k) {
-                const int a = W.cell[k]; const double q = W.qwConn[k];
+                const int a = W.cell[k]; const double q = W.qwConn[k] * W.eff;   // C33 WEFAC
                 if (q > 0) {
                     const PolyEval& U = E[size_t(a)];
                     R[size_t(a)] += q * U.pvc * c[size_t(a)];
@@ -321,7 +322,7 @@ double Simulator::polymerTransport(double dt) {
         double inj = 0, prod = 0;
         if (W.open)
             for (size_t k = 0; k < W.cell.size() && k < W.qwConn.size(); ++k) {
-                const int a = W.cell[k]; const double q = W.qwConn[k];
+                const int a = W.cell[k]; const double q = W.qwConn[k] * W.eff;   // C33 WEFAC
                 if (q > 0) prod += q * pc_[size_t(a)] * polyEval(a, pc_[size_t(a)]).pvc;
                 else inj -= q * pcInj_[w];
             }
@@ -333,7 +334,7 @@ double Simulator::polymerTransport(double dt) {
     if (pcShear_) {
         auto poro = [&](int a) {
             const double pv = fl(a).pvMult(p_[size_t(a)]) * grid_.poreVolRef[size_t(a)];
-            return pv / std::max(grid_.bulkVol[size_t(grid_.globalOf[size_t(a)])], 1e-30);
+            return pv / std::max(grid_.bulkVol[size_t(grid_.globalOf[size_t(a)])], 1e-30);   // FIELD: rb / ft3 - also converts the rb/day/ft2 flux below to ft/day   // rb vs ft3 (C35 fix)
         };
         auto swOf = [&](int a) { return iSw_ >= 0 ? sw_[size_t(a)] : 1.0; };
         auto swcrOf = [&](int a) { const auto* e = ep(a); return e ? e->swcr : st(a).tableEndPoints().swcr; };

@@ -1,0 +1,127 @@
+CAL it 0 Q_G 480000 maxdCFS 3.50622 target 3.97780
+CAL it 1 Q_G 540000 maxdCFS 3.92194 target 3.97780
+CAL it 2 Q_G 570000 maxdCFS 4.12852 target 3.97780
+CAL it 3 Q_G 555000 maxdCFS 4.02533 target 3.97780
+CAL it 4 Q_G 547500 maxdCFS 3.97366 target 3.97780
+EPS SW N5 0.2534585847 N2.5 0.2533618733 eps 1.145e-03 maxdCFS 3.9778
+PAIR SW  0 N 0.447984 0.457075 mid 0.275269 delta -6.440e-01
+PAIR SW  1 N 0.455232 0.368829 mid 0.27021 delta -5.249e-01
+PAIR SW  2 N 0.347603 0.356026 mid 0.291181 delta -2.082e-01
+PAIR SW  3 N 0.279519 0.336886 mid 0.301157 delta -2.340e-02
+PAIR SW  4 N 0.493707 0.344535 mid 0.380789 delta -1.007e-01
+PAIR SW  5 N 0.393484 0.302557 mid 0.295474 delta -1.778e-01
+PAIR SW  6 N 0.443821 0.34575 mid 0.254398 delta -5.518e-01
+PAIR SW  7 N 0.330478 0.428223 mid 0.271582 delta -3.968e-01
+PAIR SW  8 N 0.528356 0.27484 mid 0.314226 delta -2.781e-01
+PAIR SW  9 N 0.272634 0.369919 mid 0.26651 delta -2.055e-01
+PAIR SW 10 N 0.289419 0.436495 mid 0.28312 delta -2.820e-01
+PAIR SW 11 N 0.551002 0.333692 mid 0.386022 delta -1.459e-01
+PAIR SW 12 N 0.28987 0.374489 mid 0.302438 delta -9.834e-02
+PAIR SW 13 N 0.468166 0.26885 mid 0.315826 delta -1.668e-01
+PAIR SW 14 N 0.501338 0.532231 mid 0.51541 delta -2.667e-03
+PAIR SW 15 N 0.492613 0.368164 mid 0.340452 delta -2.642e-01
+PAIR SW 16 N 0.280048 0.380036 mid 0.293574 delta -1.242e-01
+PAIR SW 17 N 0.321145 0.272865 mid 0.288825 delta -2.832e-02
+PAIR SW 18 N 0.304349 0.378334 mid 0.286539 delta -1.913e-01
+PAIR SW 19 N 0.470048 0.420104 mid 0.293829 delta -5.147e-01
+PAIR SW 20 N 0.32926 0.358949 mid 0.307455 delta -1.192e-01
+PAIR SW 21 N 0.32564 0.405693 mid 0.348789 delta -4.839e-02
+PAIR SW 22 N 0.368269 0.613389 mid 0.401545 delta -2.224e-01
+PAIR SW 23 N 0.457027 0.297874 mid 0.284334 delta -3.275e-01
+PAIR SW 24 N 0.387898 0.348979 mid 0.305862 delta -2.046e-01
+PAIR SW 25 N 0.298413 0.359734 mid 0.29325 delta -1.222e-01
+PAIR SW 26 N 0.343956 0.270951 mid 0.284933 delta -7.904e-02
+PAIR SW 27 N 0.307333 0.349631 mid 0.320961 delta -2.343e-02
+PAIR SW 28 N 0.264967 0.381056 mid 0.288467 delta -1.198e-01
+PAIR SW 29 N 0.423596 0.281904 mid 0.271402 delta -2.997e-01
+PAIR SW 30 N 0.307781 0.297692 mid 0.289329 delta -4.634e-02
+PAIR SW 31 N 0.345684 0.364493 mid 0.259089 delta -3.705e-01
+PAIR SW 32 N 0.447137 0.253006 mid 0.299074 delta -1.705e-01
+PAIR SW 33 N 0.363702 0.56552 mid 0.345512 delta -3.447e-01
+PAIR SW 34 N 0.319434 0.312226 mid 0.303136 delta -4.187e-02
+PAIR SW 35 N 0.332637 0.322616 mid 0.2941 delta -1.140e-01
+PAIR SW 36 N 0.329246 0.305838 mid 0.254801 delta -2.462e-01
+PAIR SW 37 N 0.45587 0.38788 mid 0.266442 delta -5.834e-01
+PAIR SW 38 N 0.396737 0.32226 mid 0.331475 delta -8.454e-02
+PAIR SW 39 N 0.389176 0.317324 mid 0.320903 delta -1.008e-01
+SUMMARY SW violations 0/40 median delta -1.742e-01 median violator +0.000e+00 max -2.667e-03
+VERDICT H12a SW SUPPORTED
+EPS SG N5 0.4466789551 N2.5 0.447511021 eps 5.588e-03 maxdCFS 3.9737
+PAIR SG  0 N 0.936043 1.066 mid 0.512887 delta -9.517e-01
+PAIR SG  1 N 1.00217 0.774172 mid 0.495903 delta -7.910e-01
+PAIR SG  2 N 0.720697 0.695912 mid 0.543331 delta -3.036e-01
+PAIR SG  3 N 0.508497 0.654044 mid 0.562315 delta -3.371e-02
+PAIR SG  4 N 1.0767 0.662704 mid 0.756052 delta -1.503e-01
+PAIR SG  5 N 0.822383 0.60544 mid 0.568718 delta -2.553e-01
+PAIR SG  6 N 0.925819 0.717269 mid 0.44752 delta -8.358e-01
+PAIR SG  7 N 0.64828 0.974283 mid 0.505944 delta -6.035e-01
+PAIR SG  8 N 1.18581 0.493879 mid 0.594859 delta -4.118e-01
+PAIR SG  9 N 0.511116 0.735697 mid 0.473812 delta -3.157e-01
+PAIR SG 10 N 0.563019 0.914278 mid 0.536677 delta -3.763e-01
+PAIR SG 11 N 1.32133 0.708399 mid 0.854407 delta -1.878e-01
+PAIR SG 12 N 0.53488 0.799485 mid 0.585918 delta -1.387e-01
+PAIR SG 13 N 1.01216 0.489867 mid 0.614014 delta -2.231e-01
+PAIR SG 14 N 1.07651 1.15794 mid 1.11402 delta -2.884e-03
+PAIR SG 15 N 1.13266 0.797075 mid 0.697525 delta -3.833e-01
+PAIR SG 16 N 0.537024 0.798616 mid 0.574348 delta -1.627e-01
+PAIR SG 17 N 0.598543 0.484732 mid 0.523152 delta -3.534e-02
+PAIR SG 18 N 0.566696 0.828903 mid 0.543272 delta -2.844e-01
+PAIR SG 19 N 1.04636 0.987003 mid 0.567344 delta -7.920e-01
+PAIR SG 20 N 0.665454 0.779685 mid 0.623795 delta -1.583e-01
+PAIR SG 21 N 0.619879 0.879904 mid 0.697641 delta -7.490e-02
+PAIR SG 22 N 0.781792 1.42705 mid 0.859973 delta -2.842e-01
+PAIR SG 23 N 1.02631 0.572846 mid 0.535051 delta -4.944e-01
+PAIR SG 24 N 0.866552 0.687189 mid 0.603693 delta -2.869e-01
+PAIR SG 25 N 0.547017 0.736209 mid 0.55115 delta -1.641e-01
+PAIR SG 26 N 0.669091 0.485422 mid 0.516292 delta -1.181e-01
+PAIR SG 27 N 0.619288 0.75186 mid 0.664153 delta -3.225e-02
+PAIR SG 28 N 0.489563 0.829333 mid 0.556848 delta -1.843e-01
+PAIR SG 29 N 0.991565 0.509663 mid 0.495151 delta -5.159e-01
+PAIR SG 30 N 0.585927 0.547859 mid 0.527233 delta -7.522e-02
+PAIR SG 31 N 0.670595 0.808322 mid 0.464227 delta -5.929e-01
+PAIR SG 32 N 0.926541 0.445624 mid 0.555976 delta -2.340e-01
+PAIR SG 33 N 0.730907 1.34587 mid 0.709048 delta -4.645e-01
+PAIR SG 34 N 0.600463 0.596132 mid 0.567928 delta -5.347e-02
+PAIR SG 35 N 0.636463 0.622667 mid 0.537265 delta -1.718e-01
+PAIR SG 36 N 0.689884 0.592492 mid 0.455453 delta -4.078e-01
+PAIR SG 37 N 1.05862 0.812168 mid 0.492659 delta -8.987e-01
+PAIR SG 38 N 0.842235 0.608792 mid 0.644088 delta -1.264e-01
+PAIR SG 39 N 0.868039 0.626433 mid 0.649559 delta -1.504e-01
+SUMMARY SG violations 0/40 median delta -2.447e-01 median violator +0.000e+00 max -2.884e-03
+VERDICT H12a SG SUPPORTED
+H12b CHECK engine 0.44798425 matrix 0.41113903 rel 8.225e-02
+H12b CHECK engine 0.4570747 matrix 0.41999371 rel 8.113e-02
+H12b CHECK engine 0.45523184 matrix 0.41818262 rel 8.139e-02
+H12b CHECK engine 0.3688287 matrix 0.33779542 rel 8.414e-02
+H12b CHECK engine 0.34760281 matrix 0.31816244 rel 8.470e-02
+H12b LINEARITY median rel err 8.225e-02 -> NON-DISCRIMINATING
+H12b uK 1.097 1.030 0.967 0.906 0.000 0.000 -2.000 -2.000 NK 30.1064 (LP status 0)
+H12b Asig 1 Pi 3.297 uD 1.065 1.006 0.965 0.963 -1.496 -0.879 -0.815 -0.809 | ND base 0.231535 uD 0.230126 uK 0.24225 | NK base 32.4956 uD 31.5459 uK 30.1064 | L1 0.608 XD +0.053 XK +0.048 | H12b-1 REFUTED (NOT INTERPRETED: linearity check failed)
+H12b Asig 10 Pi 0.330 uD 0.634 0.908 1.082 1.377 -1.605 -1.094 -0.791 -0.511 | ND base 0.038635 uD 0.0385497 uK 0.0391873 | NK base 32.4956 uD 42.18 uK 30.1064 | L1 0.821 XD +0.017 XK +0.401 | H12b-2 SUPPORTED (NOT INTERPRETED: linearity check failed)
+H12b ENGINE N(base) 0.253459 N(uD) 0.251921 N(uK) 0.264912 ordering OK
+Traceback (most recent call last):
+  File "/home/user/ressim/research/exp/h12_storage.py", line 203, in <module>
+    h12b()
+    ~~~~^^
+  File "/home/user/ressim/research/exp/h12_storage.py", line 196, in h12b
+    res["H12b"] = out; save()
+                       ~~~~^^
+  File "/home/user/ressim/research/exp/h12_storage.py", line 20, in save
+    json.dump(res, open(OUT, "w"), indent=1)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/json/__init__.py", line 181, in dump
+    for chunk in iterable:
+                 ^^^^^^^^
+  File "/usr/local/lib/python3.13/json/encoder.py", line 435, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/usr/local/lib/python3.13/json/encoder.py", line 409, in _iterencode_dict
+    yield from chunks
+  File "/usr/local/lib/python3.13/json/encoder.py", line 409, in _iterencode_dict
+    yield from chunks
+  File "/usr/local/lib/python3.13/json/encoder.py", line 442, in _iterencode
+    o = _default(o)
+  File "/usr/local/lib/python3.13/json/encoder.py", line 182, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+                    f'is not JSON serializable')
+TypeError: Object of type bool is not JSON serializable
+EXIT 1

@@ -116,6 +116,27 @@ double textWidthPt(const std::string& s, double size, int font) {
     return w;
 }
 double Canvas::textWidth(const std::string& s, double sizePt) const { return textWidthPt(s, sizePt, font); }
+void Canvas::fillTriangles(const double* xy, int nTri, uint32_t color) {
+    // fallback: outline each triangle (canvases override this with a real fill)
+    for (int t = 0; t < nTri; ++t) {
+        const double* q = xy + 6 * t;
+        const double pts[8] = {q[0], q[1], q[2], q[3], q[4], q[5], q[0], q[1]};
+        polyline(pts, 4, color, 0.1, 0);
+    }
+}
+void Canvas::textFit(double x, double y, const std::string& s, double sizePt, double, bool vertical, uint32_t color) {
+    text(x, y, s, sizePt, 0, vertical, color);
+}
+uint32_t printColor(uint32_t c, const Snapshot* sn) {
+    if (sn)
+        for (size_t i = 0; i < sn->printFrom.size() && i < sn->printTo.size(); ++i)
+            if (sn->printFrom[i] == c) return sn->printTo[i];
+    const int r = int(c & 255), g = int((c >> 8) & 255), b = int((c >> 16) & 255);
+    const int mx = std::max(r, std::max(g, b)), mn = std::min(r, std::min(g, b));
+    if (mx - mn > 40) return c;   // a real colour (series, colormap) stays
+    if (mn > 35 && mx < 215) return c;   // mid greys may be data (grey colour-map cells): kept
+    return (c & 0xFF000000u) | uint32_t(255 - r) | (uint32_t(255 - g) << 8) | (uint32_t(255 - b) << 16);
+}
 
 // ===================================================================== ticks
 std::vector<double> niceTicks(double a, double b, int target, double* stepOut) {
@@ -157,19 +178,38 @@ std::string formatTick(double v, double step, int e) {
 namespace {
 
 struct Range { double lo = 0, hi = 1; };
-void dataRange(const Panel& p, int axis, bool x, Range& r, bool& any) {
+void dataRange(const Panel& p, int axis, bool x, Range& r, bool& any, bool logAx = false) {
     any = false;
     double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+    auto take = [&](double d) { if (std::isfinite(d) && (!logAx || d > 0)) { lo = std::min(lo, d); hi = std::max(hi, d); any = true; } };
     for (const auto& s : p.series) {
         if (!x && s.axis != axis) continue;
         const auto& v = x ? s.x : s.y;
-        for (double d : v) if (std::isfinite(d)) { lo = std::min(lo, d); hi = std::max(hi, d); any = true; }
+        for (double d : v) take(d);
+        if (!x) for (double d : s.ylo) take(d);
+        if (s.barWidth > 0) {
+            if (x) for (double d : s.x) { take(d - 0.5 * s.barWidth); take(d + 0.5 * s.barWidth); }
+            else take(0.0);
+        }
+    }
+    if (axis == 0) {   // C23 layers live on the primary axes
+        for (const auto& h : p.heatmaps) { take(x ? h.x0 : h.y0); take(x ? h.x1 : h.y1); }
+        for (const auto& sh : p.shapes)
+            if (sh.kind == Shape::Polyline || sh.kind == Shape::Polygon) for (double d : (x ? sh.x : sh.y)) take(d);
     }
     if (!any) { r = {0, 1}; return; }
+    if (logAx) {   // transformed (log10) range, padded to whole decades when it spans several
+        double a = std::log10(lo), b = std::log10(hi);
+        if (b - a < 1e-9) { a -= 0.5; b += 0.5; }
+        else if (b - a >= 2) { a = std::floor(a + 1e-9); b = std::ceil(b - 1e-9); }
+        else { const double pad = (b - a) * 0.05; a -= pad; b += pad; }
+        r = {a, b};
+        return;
+    }
     if (hi - lo < 1e-12 * std::max(1.0, std::fabs(hi))) {
         const double d = std::fabs(hi) > 0 ? std::fabs(hi) * 0.1 : 1.0;
         lo -= d; hi += d;
-    } else if (!x) {
+    } else if (!x && p.heatmaps.empty()) {
         const double pad = (hi - lo) * 0.05;
         // keep zero-based quantities anchored at zero
         lo = (lo >= 0 && lo - pad < 0) ? 0.0 : lo - pad;
@@ -179,6 +219,9 @@ void dataRange(const Panel& p, int axis, bool x, Range& r, bool& any) {
 }
 
 struct Axis {
+    bool log = false;   // C17: r, ticks in log10 space
+    bool inv = false;   // C23: inverted axis (values grow downwards / to the left)
+    double tf(double v) const { return log ? (v > 0 ? std::log10(v) : std::numeric_limits<double>::quiet_NaN()) : v; }
     Range r;
     std::vector<double> ticks;
     double step = 1;
@@ -186,7 +229,29 @@ struct Axis {
     std::vector<std::string> labels;
     double labelW = 0;
 };
+std::string logLabel(double t) {   // tick label of a log axis at log10 value t
+    const double n = std::round(t);
+    if (std::fabs(t - n) < 1e-9) {
+        if (n >= -2 && n <= 3) { char b[32]; std::snprintf(b, sizeof b, "%g", std::pow(10.0, n)); return b; }
+        return "10^{" + std::string(n < 0 ? "\xE2\x88\x92" : "") + std::to_string(int(std::fabs(n))) + "}";
+    }
+    char b[32]; std::snprintf(b, sizeof b, "%g", std::pow(10.0, t));
+    return b;
+}
 void makeAxis(Axis& a, int target, double fs, int font) {
+    if (a.log) {
+        a.ticks.clear(); a.exp = 0; a.step = 1; a.labels.clear(); a.labelW = 0;
+        const int d0 = int(std::ceil(a.r.lo - 1e-9)), d1 = int(std::floor(a.r.hi + 1e-9));
+        const int nd = d1 - d0 + 1;
+        const int every = std::max(1, (nd + std::max(1, target) - 1) / std::max(1, target));
+        for (int d = d0; d <= d1; ++d) if ((d - d0) % every == 0) a.ticks.push_back(double(d));
+        if (nd < 3)   // short range: 1-2-5 sequence
+            for (int d = d0 - 1; d <= d1; ++d)
+                for (double m : {2.0, 5.0}) { const double t = d + std::log10(m); if (t >= a.r.lo - 1e-9 && t <= a.r.hi + 1e-9) a.ticks.push_back(t); }
+        std::sort(a.ticks.begin(), a.ticks.end());
+        for (double t : a.ticks) { a.labels.push_back(logLabel(t)); a.labelW = std::max(a.labelW, textWidthPt(a.labels.back(), fs, font)); }
+        return;
+    }
     a.ticks = niceTicks(a.r.lo, a.r.hi, target, &a.step);
     double m = 0;
     for (double t : a.ticks) m = std::max(m, std::fabs(t));
@@ -200,16 +265,65 @@ void makeAxis(Axis& a, int target, double fs, int font) {
 }
 std::string expLabel(int e) { return e ? "\xC3\x97" "10^{" + std::to_string(e) + "}" : std::string(); }
 
-struct LegendItem { std::string label; uint32_t color; double width; bool scatter, markers; int dash; };
+struct LegendItem { std::string label; uint32_t color; double width; bool scatter, markers; int dash; int swatch = 0; int marker = 0; uint32_t stroke = 0; };
+// C23: light neutral colours made for the dark theme (white / light grey lines and text) print dark on paper
+uint32_t ink(uint32_t c, bool keep = false) {
+    if (keep) return c;
+    const int r = int(c & 255), g = int(c >> 8 & 255), b = int(c >> 16 & 255);
+    const int mx = std::max(r, std::max(g, b)), mn = std::min(r, std::min(g, b));
+    if (mx - mn < 40 && (r * 299 + g * 587 + b * 114) / 1000 > 150) {
+        const uint32_t a = std::max<uint32_t>(c >> 24, 90u);
+        return (rgba(45, 45, 45) & 0x00FFFFFFu) | (a << 24);
+    }
+    return c;
+}
 std::vector<LegendItem> legendItems(const Panel& p) {
     std::vector<LegendItem> v;
     std::set<std::string> seen;
     for (const auto& s : p.series) {
         if (!s.legend || s.label.empty() || s.label.compare(0, 2, "##") == 0) continue;
         if (!seen.insert(s.label).second) continue;
-        v.push_back({s.label, s.color, s.width, s.scatter, s.markers, s.dash});
+        LegendItem it{s.label, ink(s.color), s.width, s.scatter, s.markers, s.dash};
+        if (!s.ylo.empty() || s.barWidth > 0) { it.swatch = 1; it.stroke = s.barLine; }
+        v.push_back(it);
+    }
+    for (const auto& sh : p.shapes) {
+        if (sh.label.empty() || sh.label.compare(0, 2, "##") == 0 || !seen.insert(sh.label).second) continue;
+        LegendItem it{sh.label, ink(sh.kind == Shape::Polygon || sh.kind == Shape::Marker ? (sh.fill ? sh.fill : sh.stroke) : sh.stroke, sh.keepColor),
+                      std::max(0.4, sh.widthPx / 1.6), false, false, sh.dash};
+        it.swatch = sh.kind == Shape::Polygon ? 1 : sh.kind == Shape::Marker ? 2 : 0;
+        it.marker = sh.marker;
+        it.stroke = ink(sh.stroke, sh.keepColor);
+        v.push_back(it);
     }
     return v;
+}
+// C23 marker shapes (radius r in pt)
+void drawMarker(Canvas& c, double x, double y, double r, int shape, uint32_t fill, uint32_t stroke, double lw) {
+    const uint32_t sc = stroke ? stroke : fill;
+    switch (shape) {
+    case 1: if (fill) c.fillRect(x - r, y - r, 2 * r, 2 * r, fill); c.strokeRect(x - r, y - r, 2 * r, 2 * r, sc, lw); break;
+    case 2: case 3: {
+        double t[6];
+        double pts[10];
+        int np;
+        if (shape == 2) { const double q[8] = {x, y - r * 1.25, x - r, y, x, y + r * 1.25, x + r, y}; std::copy(q, q + 8, pts); np = 4; }
+        else { const double q[6] = {x, y - r * 1.2, x - r * 1.1, y + r * 0.8, x + r * 1.1, y + r * 0.8}; std::copy(q, q + 6, pts); np = 3; }
+        if (fill) {
+            for (int k = 1; k + 1 < np; ++k) {   // fan, counter-clockwise on the page (y down)
+                t[0] = pts[0]; t[1] = pts[1]; t[2] = pts[2 * k]; t[3] = pts[2 * k + 1]; t[4] = pts[2 * k + 2]; t[5] = pts[2 * k + 3];
+                if ((t[2] - t[0]) * (t[5] - t[1]) - (t[3] - t[1]) * (t[4] - t[0]) < 0) { std::swap(t[2], t[4]); std::swap(t[3], t[5]); }
+                c.fillTriangles(t, 1, fill);
+            }
+        }
+        pts[2 * np] = pts[0]; pts[2 * np + 1] = pts[1];
+        c.polyline(pts, np + 1, sc, lw, 0);
+        break;
+    }
+    case 4: { const double a[4] = {x - r, y - r, x + r, y + r}, b[4] = {x - r, y + r, x + r, y - r}; c.polyline(a, 2, sc, lw, 0); c.polyline(b, 2, sc, lw, 0); break; }
+    case 5: { const double a[4] = {x - r, y, x + r, y}, b[4] = {x, y - r, x, y + r}; c.polyline(a, 2, sc, lw, 0); c.polyline(b, 2, sc, lw, 0); break; }
+    default: c.circle(x, y, r, fill, sc, lw); break;
+    }
 }
 double dashLen(int dash, double w, double* gap) {
     switch (dash) {
@@ -249,30 +363,71 @@ void drawLegendBox(Ctx& X, const std::vector<LegendItem>& items, double x, doubl
         const double ix = x + padIn + col * (itemW + colGap), iy = y + padIn + row * rowH + fs * 0.5;
         const auto& it = items[i];
         const double lw = X.st.lineWidthPt * it.width;
-        if (!it.scatter) {
-            const double pts[4] = {ix, iy, ix + sample, iy};
-            X.c.polyline(pts, 2, it.color, lw, it.dash);
+        if (it.swatch == 1) {   // filled area / bars
+            X.c.fillRect(ix, iy - fs * 0.38, sample, fs * 0.76, it.color);
+            if (it.stroke) X.c.strokeRect(ix, iy - fs * 0.38, sample, fs * 0.76, it.stroke, 0.4);
+        } else if (it.swatch == 2) {
+            drawMarker(X.c, ix + sample * 0.5, iy, fs * 0.32, it.marker, it.color, it.stroke, 0.5);
+        } else {
+            if (!it.scatter) {
+                const double pts[4] = {ix, iy, ix + sample, iy};
+                X.c.polyline(pts, 2, it.color, lw, it.dash);
+            }
+            if (it.scatter || it.markers) X.c.circle(ix + sample * 0.5, iy, std::max(1.4, lw * 1.3), it.color, it.color, 0.3);
         }
-        if (it.scatter || it.markers) X.c.circle(ix + sample * 0.5, iy, std::max(1.4, lw * 1.3), it.color, it.color, 0.3);
         X.c.text(ix + sample + gap, iy + fs * 0.34, it.label, fs, 0, false, rgba(0, 0, 0));
     }
 }
 
-struct PanelLayout { Axis x, y, y2; double l = 0, r = 0, t = 0, b = 0; bool hasY2 = false; };
+struct PanelLayout {
+    Axis x, y, y2, cb; double l = 0, r = 0, t = 0, b = 0; bool hasY2 = false;
+    ColorBar bar; bool hasCb = false; double cbW = 0;   // C23 colour bar (explicit or from the first heatmap)
+};
 
 void computeAxes(Ctx& X, const Panel& p, PanelLayout& L, double cellW, double cellH) {
     Range xr, yr, y2r; bool any;
-    dataRange(p, 0, true, xr, any);
-    dataRange(p, 0, false, yr, any);
+    L.x.log = p.logX; L.y.log = p.logY; L.y2.log = p.logY2;
+    dataRange(p, 0, true, xr, any, p.logX);
+    dataRange(p, 0, false, yr, any, p.logY);
     bool any2 = false;
-    dataRange(p, 1, false, y2r, any2);
+    dataRange(p, 1, false, y2r, any2, p.logY2);
     L.hasY2 = any2 || (p.hasY2 && p.hasLimits && X.st.useLimits && any2);
-    if (X.st.useLimits && p.hasLimits) {
-        if (p.x1 > p.x0) xr = {p.x0, p.x1};
-        if (p.y1 > p.y0) yr = {p.y0, p.y1};
-        if (p.hasY2 && p.y21 > p.y20) y2r = {p.y20, p.y21};
+    if (X.st.useLimits && p.hasLimits) {   // visible app ranges (log axes: only a positive range)
+        auto lim = [](bool lg, double a, double b, Range& r) {
+            if (!(b > a)) return;
+            if (!lg) { r = {a, b}; return; }
+            if (a > 0) r = {std::log10(a), std::log10(b)};
+        };
+        lim(p.logX, p.x0, p.x1, xr);
+        lim(p.logY, p.y0, p.y1, yr);
+        if (p.hasY2) lim(p.logY2, p.y20, p.y21, y2r);
+    }
+    L.x.inv = p.invertX; L.y.inv = p.invertY; L.y2.inv = p.invertY;
+    if (p.equal && !p.logX && !p.logY && cellW > 0 && cellH > 0) {   // C23: equal scaling - widen the short axis around its centre
+        const double dx = xr.hi - xr.lo, dy = yr.hi - yr.lo, ratio = cellW / cellH;
+        if (dx > 0 && dy > 0) {
+            if (dx / dy < ratio) { const double c0 = 0.5 * (xr.lo + xr.hi), h = 0.5 * dy * ratio; xr = {c0 - h, c0 + h}; }
+            else { const double c0 = 0.5 * (yr.lo + yr.hi), h = 0.5 * dx / ratio; yr = {c0 - h, c0 + h}; }
+        }
     }
     L.x.r = xr; L.y.r = yr; L.y2.r = y2r;
+    // colour bar
+    L.hasCb = false;
+    if (X.st.layers) {
+        if (p.cbar.on) { L.bar = p.cbar; L.hasCb = true; }
+        else if (!p.heatmaps.empty()) {
+            const Heatmap& h = p.heatmaps.front();
+            L.bar.on = true; L.bar.vmin = h.vmin; L.bar.vmax = h.vmax; L.bar.lut = h.lut;
+            L.bar.label = h.label.compare(0, 2, "##") == 0 ? std::string() : h.label.substr(0, h.label.find("##"));
+            L.hasCb = true;
+        }
+    }
+    if (L.hasCb) {
+        L.cb.r = {std::min(L.bar.vmin, L.bar.vmax), std::max(L.bar.vmin, L.bar.vmax)};
+        if (!(L.cb.r.hi > L.cb.r.lo)) L.cb.r.hi = L.cb.r.lo + 1;
+        makeAxis(L.cb, std::max(2, std::min(7, int(cellH / (X.tfs * 2.4)))), X.tfs, X.font);
+        L.cbW = X.fs * 0.7 + X.fs * 0.9 + X.pad + L.cb.labelW + (L.bar.label.empty() ? 0 : X.lineH + X.fs * 0.2) + (L.cb.exp ? 0 : 0);
+    }
     // cellW / cellH: plot frame size (estimate on the first pass). Fewer ticks until the labels do not collide.
     int tx = std::max(2, std::min(9, int(cellW / (X.fs * 4.5)))), ty = std::max(2, std::min(8, int(cellH / (X.tfs * 2.4))));
     for (;;) {
@@ -293,18 +448,70 @@ void drawPanel(Ctx& X, const Panel& p, const PanelLayout& L, double px, double p
     Canvas& c = X.c;
     const Style& st = X.st;
     const uint32_t black = rgba(0, 0, 0), gridC = rgba(222, 222, 222);
-    auto mx = [&](double v) { return px + (v - L.x.r.lo) / (L.x.r.hi - L.x.r.lo) * pw; };
-    auto my = [&](const Axis& a, double v) { return py + ph - (v - a.r.lo) / (a.r.hi - a.r.lo) * ph; };
+    // xT / yT: transformed (axis-space) coordinates - ticks; mx / my: data values (log axes transform, <= 0 -> NaN)
+    auto xT = [&](double t) { const double f = (t - L.x.r.lo) / (L.x.r.hi - L.x.r.lo); return px + (L.x.inv ? 1 - f : f) * pw; };
+    auto yT = [&](const Axis& a, double t) { const double f = (t - a.r.lo) / (a.r.hi - a.r.lo); return py + ph - (a.inv ? 1 - f : f) * ph; };
+    auto mx = [&](double v) { return xT(L.x.tf(v)); };
+    auto my = [&](const Axis& a, double v) { return yT(a, a.tf(v)); };
+    const bool axes = !p.noAxes;
     // grid
-    if (st.grid) {
-        for (double t : L.x.ticks) { const double xx = mx(t), pts[4] = {xx, py, xx, py + ph}; c.polyline(pts, 2, gridC, 0.35, 0); }
-        for (double t : L.y.ticks) { const double yy = my(L.y, t), pts[4] = {px, yy, px + pw, yy}; c.polyline(pts, 2, gridC, 0.35, 0); }
+    if (st.grid && axes) {
+        for (double t : L.x.ticks) { const double xx = xT(t), pts[4] = {xx, py, xx, py + ph}; c.polyline(pts, 2, gridC, 0.35, 0); }
+        for (double t : L.y.ticks) { const double yy = yT(L.y, t), pts[4] = {px, yy, px + pw, yy}; c.polyline(pts, 2, gridC, 0.35, 0); }
     }
     // series
     c.pushClip(px, py, pw, ph);
+    // C23 native layers below the series: heatmaps (merged runs of equal colour), cell edges, filled polygons
+    const bool layers = st.layers;
+    if (layers) {
+        for (const Heatmap& h : p.heatmaps) {
+            if (h.rows <= 0 || h.cols <= 0 || h.v.size() < size_t(h.rows) * size_t(h.cols) || L.x.log || L.y.log) continue;
+            const double cw = (h.x1 - h.x0) / h.cols, chh = (h.y1 - h.y0) / h.rows;
+            for (int r = 0; r < h.rows; ++r) {
+                const double ya = my(L.y, h.y1 - r * chh), yb = my(L.y, h.y1 - (r + 1) * chh);
+                int c0 = 0;
+                while (c0 < h.cols) {
+                    auto val = [&](int cc) { return h.colMajor ? h.v[size_t(cc) * h.rows + r] : h.v[size_t(r) * h.cols + cc]; };
+                    const uint32_t col = h.colorAt(val(c0));
+                    int c1 = c0 + 1;
+                    while (c1 < h.cols && h.colorAt(val(c1)) == col) ++c1;
+                    const double xa = mx(h.x0 + c0 * cw), xb = mx(h.x0 + c1 * cw);
+                    // a hair of overlap hides the seams between adjacent rectangles in PDF viewers
+                    const double ov = 0.15;
+                    c.fillRect(std::min(xa, xb) - ov, std::min(ya, yb) - ov, std::fabs(xb - xa) + 2 * ov, std::fabs(yb - ya) + 2 * ov, col);
+                    c0 = c1;
+                }
+            }
+            if (st.cellEdges || p.cellEdges) {
+                const uint32_t ec = rgba(40, 40, 40, 110);
+                for (int k = 0; k <= h.cols; ++k) { const double xx = mx(h.x0 + k * cw), a[4] = {xx, my(L.y, h.y0), xx, my(L.y, h.y1)}; c.polyline(a, 2, ec, 0.25, 0); }
+                for (int k = 0; k <= h.rows; ++k) { const double yy = my(L.y, h.y1 - k * chh), a[4] = {mx(h.x0), yy, mx(h.x1), yy}; c.polyline(a, 2, ec, 0.25, 0); }
+            }
+        }
+        std::vector<double> poly, tri;
+        for (const Shape& sh : p.shapes) {
+            if (sh.kind != Shape::Polygon || sh.x.size() < 3 || sh.y.size() < sh.x.size()) continue;
+            poly.clear();
+            for (size_t i = 0; i < sh.x.size(); ++i) { poly.push_back(mx(sh.x[i])); poly.push_back(my(L.y, sh.y[i])); }
+            if (sh.fill >> 24) {
+                tri.clear();
+                for (size_t k = 1; k + 1 < sh.x.size(); ++k) {
+                    double t[6] = {poly[0], poly[1], poly[2 * k], poly[2 * k + 1], poly[2 * k + 2], poly[2 * k + 3]};
+                    if ((t[2] - t[0]) * (t[5] - t[1]) - (t[3] - t[1]) * (t[4] - t[0]) < 0) { std::swap(t[2], t[4]); std::swap(t[3], t[5]); }
+                    tri.insert(tri.end(), t, t + 6);
+                }
+                if (!tri.empty()) c.fillTriangles(tri.data(), int(tri.size() / 6), sh.fill);
+            }
+            if (sh.stroke >> 24 && sh.widthPx > 0) {
+                poly.push_back(poly[0]); poly.push_back(poly[1]);
+                c.polyline(poly.data(), int(poly.size() / 2), ink(sh.stroke, sh.keepColor), std::max(0.25, sh.widthPx * 0.5), sh.dash);
+            }
+        }
+    }
     for (double v : p.vlines) {
-        if (v < L.x.r.lo || v > L.x.r.hi) continue;
-        const double xx = mx(v), pts[4] = {xx, py, xx, py + ph};
+        const double tv = L.x.tf(v);
+        if (!std::isfinite(tv) || tv < L.x.r.lo || tv > L.x.r.hi) continue;
+        const double xx = xT(tv), pts[4] = {xx, py, xx, py + ph};
         c.polyline(pts, 2, rgba(120, 120, 120), 0.5, 1);
     }
     std::vector<double> buf;
@@ -312,12 +519,38 @@ void drawPanel(Ctx& X, const Panel& p, const PanelLayout& L, double px, double p
         const Axis& ya = (s.axis == 1 && L.hasY2) ? L.y2 : L.y;
         const double lw = st.lineWidthPt * s.width;
         const size_t n = std::min(s.x.size(), s.y.size());
+        const uint32_t scol = ink(s.color);
+        if (layers && !s.ylo.empty()) {   // C23: filled band between ylo and y
+            const size_t m = std::min(n, s.ylo.size());
+            std::vector<double> tri;
+            for (size_t i = 0; i + 1 < m; ++i) {
+                const double xa = mx(s.x[i]), xb = mx(s.x[i + 1]);
+                const double a0 = my(ya, s.ylo[i]), a1 = my(ya, s.y[i]), b0 = my(ya, s.ylo[i + 1]), b1 = my(ya, s.y[i + 1]);
+                if (!std::isfinite(xa + xb + a0 + a1 + b0 + b1)) continue;
+                double t1[6] = {xa, a0, xb, b0, xb, b1}, t2[6] = {xa, a0, xb, b1, xa, a1};
+                for (double* t : {t1, t2}) {
+                    if ((t[2] - t[0]) * (t[5] - t[1]) - (t[3] - t[1]) * (t[4] - t[0]) < 0) { std::swap(t[2], t[4]); std::swap(t[3], t[5]); }
+                    tri.insert(tri.end(), t, t + 6);
+                }
+            }
+            if (!tri.empty()) c.fillTriangles(tri.data(), int(tri.size() / 6), s.color);
+            continue;
+        }
+        if (layers && s.barWidth > 0) {   // C23: bars from 0
+            for (size_t i = 0; i < n; ++i) {
+                const double xa = mx(s.x[i] - 0.5 * s.barWidth), xb = mx(s.x[i] + 0.5 * s.barWidth), y0 = my(ya, 0.0), y1 = my(ya, s.y[i]);
+                if (!std::isfinite(xa + xb + y0 + y1)) continue;
+                c.fillRect(std::min(xa, xb), std::min(y0, y1), std::fabs(xb - xa), std::fabs(y1 - y0), s.color);
+                if (s.barLine >> 24) c.strokeRect(std::min(xa, xb), std::min(y0, y1), std::fabs(xb - xa), std::fabs(y1 - y0), ink(s.barLine), 0.4);
+            }
+            continue;
+        }
         if (!s.scatter) {
             buf.clear();
-            auto flush = [&]() { if (buf.size() >= 4) c.polyline(buf.data(), int(buf.size() / 2), s.color, lw, s.dash); buf.clear(); };
+            auto flush = [&]() { if (buf.size() >= 4) c.polyline(buf.data(), int(buf.size() / 2), scol, lw, s.dash); buf.clear(); };
             for (size_t i = 0; i < n; ++i) {
-                if (!std::isfinite(s.x[i]) || !std::isfinite(s.y[i])) { flush(); continue; }
                 const double xx = mx(s.x[i]), yy = my(ya, s.y[i]);
+                if (!std::isfinite(xx) || !std::isfinite(yy)) { flush(); continue; }
                 // drop points that coincide on the output (keeps PDFs of long runs small)
                 if (buf.size() >= 2 && std::fabs(buf[buf.size() - 2] - xx) < 0.05 && std::fabs(buf.back() - yy) < 0.05) continue;
                 buf.push_back(xx); buf.push_back(yy);
@@ -327,10 +560,34 @@ void drawPanel(Ctx& X, const Panel& p, const PanelLayout& L, double px, double p
         if (s.scatter || s.markers) {
             const double r = std::max(1.2, lw * 1.25);
             for (size_t i = 0; i < n; ++i)
-                if (std::isfinite(s.x[i]) && std::isfinite(s.y[i])) c.circle(mx(s.x[i]), my(ya, s.y[i]), r, s.color, s.color, 0.3);
+                if (std::isfinite(mx(s.x[i])) && std::isfinite(my(ya, s.y[i]))) c.circle(mx(s.x[i]), my(ya, s.y[i]), r, scol, scol, 0.3);
+        }
+    }
+    // C23 native layers above the series: lines, markers, text
+    if (layers) {
+        std::vector<double> pl;
+        for (const Shape& sh : p.shapes) {
+            if (sh.kind == Shape::Polyline && sh.x.size() >= 2) {
+                pl.clear();
+                for (size_t i = 0; i < sh.x.size() && i < sh.y.size(); ++i) { pl.push_back(mx(sh.x[i])); pl.push_back(my(L.y, sh.y[i])); }
+                c.polyline(pl.data(), int(pl.size() / 2), ink(sh.stroke, sh.keepColor), std::max(0.25, sh.widthPx * 0.5), sh.dash);
+            } else if (sh.kind == Shape::Marker && !sh.x.empty() && !sh.y.empty()) {
+                const double xx = mx(sh.x[0]), yy = my(L.y, sh.y[0]);
+                if (std::isfinite(xx) && std::isfinite(yy))
+                    drawMarker(c, xx, yy, std::max(1.0, sh.sizePx * 0.55), sh.marker, sh.fill, sh.stroke ? ink(sh.stroke, sh.keepColor) : 0, std::max(0.3, sh.widthPx * 0.4));
+            }
         }
     }
     c.popClip();
+    if (layers) {   // text annotations may extend beyond the frame a little (labels of wells at the edge)
+        for (const Shape& sh : p.shapes) {
+            if (sh.kind != Shape::Text || sh.text.empty() || sh.x.empty() || sh.y.empty()) continue;
+            const double xx = mx(sh.x[0]) + sh.offX * 0.75, yy = my(L.y, sh.y[0]) + sh.offY * 0.75;
+            if (!std::isfinite(xx) || !std::isfinite(yy) || xx < px - X.fs || xx > px + pw + X.fs || yy < py - X.fs || yy > py + ph + X.fs) continue;
+            c.text(xx, sh.vertical ? yy : yy + X.tfs * 0.34, sh.text, X.tfs, sh.vertical ? 1 : sh.halign, sh.vertical, ink(sh.stroke, sh.keepColor));
+        }
+    }
+    if (axes) {
     // frame + ticks
     const double fw = 0.6;
     if (st.box) c.strokeRect(px, py, pw, ph, black, fw);
@@ -342,51 +599,97 @@ void drawPanel(Ctx& X, const Panel& p, const PanelLayout& L, double px, double p
     const double tl = X.tick, mtl = X.tick * 0.55;
     auto minorTicks = [&](const Axis& a, double lo, double hi, auto&& draw) {
         if (!st.minorTicks || a.ticks.empty()) return;
+        if (a.log) {   // 2..9 x 10^n
+            for (int d = int(std::floor(lo)) - 1; d <= int(std::ceil(hi)); ++d)
+                for (int m = 2; m <= 9; ++m) { const double t = d + std::log10(double(m)); if (t >= lo - 1e-12 && t <= hi + 1e-12) draw(t); }
+            return;
+        }
         const double m = a.step / std::pow(10.0, std::floor(std::log10(a.step) + 1e-9));
         const int nm = std::fabs(m - 2) < 1e-6 ? 4 : 5;
         const double ms = a.step / nm;
         for (double v = a.ticks.front() - a.step; v <= hi + 1e-12; v += ms) if (v >= lo - 1e-12) draw(v);
     };
     for (size_t i = 0; i < L.x.ticks.size(); ++i) {
-        const double xx = mx(L.x.ticks[i]);
+        const double xx = xT(L.x.ticks[i]);
         const double a[4] = {xx, py + ph, xx, py + ph - tl};
         c.polyline(a, 2, black, fw, 0);
         if (st.box) { const double b[4] = {xx, py, xx, py + tl}; c.polyline(b, 2, black, fw, 0); }
         c.text(xx, py + ph + X.pad + X.tfs * 0.78, L.x.labels[i], X.tfs, 1, false, black);
     }
     minorTicks(L.x, L.x.r.lo, L.x.r.hi, [&](double v) {
-        const double xx = mx(v), a[4] = {xx, py + ph, xx, py + ph - mtl};
+        const double xx = xT(v), a[4] = {xx, py + ph, xx, py + ph - mtl};
         c.polyline(a, 2, black, fw * 0.8, 0);
         if (st.box) { const double b[4] = {xx, py, xx, py + mtl}; c.polyline(b, 2, black, fw * 0.8, 0); }
     });
     for (size_t i = 0; i < L.y.ticks.size(); ++i) {
-        const double yy = my(L.y, L.y.ticks[i]);
+        const double yy = yT(L.y, L.y.ticks[i]);
         const double a[4] = {px, yy, px + tl, yy};
         c.polyline(a, 2, black, fw, 0);
         if (st.box && !L.hasY2) { const double b[4] = {px + pw, yy, px + pw - tl, yy}; c.polyline(b, 2, black, fw, 0); }
         c.text(px - X.pad, yy + X.tfs * 0.34, L.y.labels[i], X.tfs, 2, false, black);
     }
     minorTicks(L.y, L.y.r.lo, L.y.r.hi, [&](double v) {
-        const double yy = my(L.y, v), a[4] = {px, yy, px + mtl, yy};
+        const double yy = yT(L.y, v), a[4] = {px, yy, px + mtl, yy};
         c.polyline(a, 2, black, fw * 0.8, 0);
         if (st.box && !L.hasY2) { const double b[4] = {px + pw, yy, px + pw - mtl, yy}; c.polyline(b, 2, black, fw * 0.8, 0); }
     });
     if (L.hasY2) {
         for (size_t i = 0; i < L.y2.ticks.size(); ++i) {
-            const double yy = my(L.y2, L.y2.ticks[i]);
+            const double yy = yT(L.y2, L.y2.ticks[i]);
             const double a[4] = {px + pw, yy, px + pw - tl, yy};
             c.polyline(a, 2, black, fw, 0);
             c.text(px + pw + X.pad, yy + X.tfs * 0.34, L.y2.labels[i], X.tfs, 0, false, black);
         }
     }
+    }
+    // C23 colour bar right of the frame (after the right axis labels)
+    if (L.hasCb && !L.bar.lut.empty()) {
+        const double bx = px + pw + (L.hasY2 ? L.y2.labelW + X.pad * 2 + (p.y2label.empty() ? 0 : X.lineH + X.fs * 0.1) : 0) + X.fs * 0.7;
+        const double bw = X.fs * 0.9;
+        const int nseg = std::min<int>(256, int(L.bar.lut.size()));
+        for (int k = 0; k < nseg; ++k) {
+            const double f0 = double(k) / nseg, f1 = double(k + 1) / nseg;
+            const size_t li = std::min(L.bar.lut.size() - 1, size_t((k + 0.5) / nseg * L.bar.lut.size()));
+            const double ya = py + ph - f1 * ph, yb = py + ph - f0 * ph;
+            c.fillRect(bx, ya - 0.1, bw, (yb - ya) + 0.2, L.bar.lut[L.bar.vmin <= L.bar.vmax ? li : L.bar.lut.size() - 1 - li] | 0xFF000000u);
+        }
+        c.strokeRect(bx, py, bw, ph, black, 0.5);
+        for (size_t i = 0; i < L.cb.ticks.size(); ++i) {
+            const double yy = yT(L.cb, L.cb.ticks[i]);
+            const double a[4] = {bx + bw, yy, bx + bw - X.tick * 0.8, yy};
+            c.polyline(a, 2, black, 0.5, 0);
+            c.text(bx + bw + X.pad, yy + X.tfs * 0.34, L.cb.labels[i], X.tfs, 0, false, black);
+        }
+        if (L.cb.exp) c.text(bx, py - X.pad * 0.8, expLabel(L.cb.exp), X.tfs, 0, false, black);
+        if (!L.bar.label.empty()) c.text(bx + bw + X.pad * 2 + L.cb.labelW + X.fs * 0.95, py + ph * 0.5, L.bar.label, X.fs, 1, true, black);
+    }
+    if (axes) {
     // axis factor labels (x10^n) at the top of the y axes / end of the x axis
     if (L.y.exp) c.text(px, py - X.pad * 0.8, expLabel(L.y.exp), X.tfs, 0, false, black);
     if (L.hasY2 && L.y2.exp) c.text(px + pw, py - X.pad * 0.8, expLabel(L.y2.exp), X.tfs, 2, false, black);
     if (L.x.exp) c.text(px + pw, py + ph + X.pad + X.tfs * 0.78 + X.lineH, expLabel(L.x.exp), X.tfs, 2, false, black);
     // labels
-    if (!p.xlabel.empty()) c.text(px + pw * 0.5, py + ph + X.pad + X.tfs * 0.78 + X.lineH * 1.05 + X.fs * 0.2, p.xlabel, X.fs, 1, false, black);
-    if (!p.ylabel.empty()) c.text(px - X.pad * 2 - L.y.labelW - X.fs * 0.25, py + ph * 0.5, p.ylabel, X.fs, 1, true, black);
-    if (L.hasY2 && !p.y2label.empty()) c.text(px + pw + X.pad * 2 + L.y2.labelW + X.fs * 0.95, py + ph * 0.5, p.y2label, X.fs, 1, true, black);
+    // C17: axis labels longer than the frame side shrink (down to 65 %) and are then shortened with an ellipsis - never clipped
+    auto fitLabel = [&](const std::string& lab, double room, double& size) {
+        size = X.fs;
+        const double w = textWidthPt(lab, X.fs, X.font);
+        if (w <= room || w <= 0) return lab;
+        size = std::max(0.65 * X.fs, X.fs * room / w);
+        std::string t = lab;
+        while (t.size() > 2 && textWidthPt(t + "...", size, X.font) > room) {
+            t.pop_back();
+            while (!t.empty() && (static_cast<unsigned char>(t.back()) & 0xC0) == 0x80) t.pop_back();   // whole UTF-8 characters
+            if (!t.empty() && static_cast<unsigned char>(t.back()) >= 0xC0) t.pop_back();
+        }
+        const size_t sp = t.rfind("^{");   // never leave an open superscript
+        if (sp != std::string::npos && t.find('}', sp) == std::string::npos) t.resize(sp);
+        return t.size() == lab.size() ? t : t + "...";
+    };
+    double lfs = X.fs;
+    if (!p.xlabel.empty()) { const std::string t = fitLabel(p.xlabel, pw, lfs); c.text(px + pw * 0.5, py + ph + X.pad + X.tfs * 0.78 + X.lineH * 1.05 + X.fs * 0.2, t, lfs, 1, false, black); }
+    if (!p.ylabel.empty()) { const std::string t = fitLabel(p.ylabel, ph, lfs); c.text(px - X.pad * 2 - L.y.labelW - X.fs * 0.25, py + ph * 0.5, t, lfs, 1, true, black); }
+    if (L.hasY2 && !p.y2label.empty()) { const std::string t = fitLabel(p.y2label, ph, lfs); c.text(px + pw + X.pad * 2 + L.y2.labelW + X.fs * 0.95, py + ph * 0.5, t, lfs, 1, true, black); }
+    }
     if (st.titles && !p.title.empty()) c.text(px + pw * 0.5, py - X.pad - (L.y.exp || (L.hasY2 && L.y2.exp) ? X.lineH : 0), p.title, X.fs, 1, false, black);
     // legend inside
     if (legendInside) {
@@ -435,12 +738,61 @@ Figure recolored(const Figure& f, int palette) {
             size_t k = 0;
             while (k < seen.size() && seen[k] != key) ++k;
             if (k == seen.size()) seen.push_back(key);
-            s.color = distinctColor(int(k), palette);
+            s.color = (distinctColor(int(k), palette) & 0x00FFFFFFu) | (s.color & 0xFF000000u);   // bands keep their transparency
         }
     return g;
 }
 
+void renderSnapshot(const Snapshot& sn, const Style& st, Canvas& c) {
+    const double W = st.widthMM / 25.4 * 72.0, H = st.heightMM / 25.4 * 72.0;
+    c.font = st.font;
+    c.begin(W, H, st.transparent);
+    const double sw = sn.x1 - sn.x0, sh = sn.y1 - sn.y0;
+    if (!(sw > 0 && sh > 0)) { c.end(); return; }
+    const double k = std::min(W / sw, H / sh), ox = (W - sw * k) * 0.5, oy = (H - sh * k) * 0.5;
+    auto col = [&](uint32_t u) { return st.printColors ? printColor(u, &sn) : u; };
+    if (!st.transparent) c.fillRect(ox, oy, sw * k, sh * k, col(sn.bg) | 0xFF000000u);
+    c.pushClip(ox, oy, sw * k, sh * k);
+    int cur = -2;
+    bool open = false;
+    auto setClip = [&](int ci) {
+        if (ci == cur) return;
+        if (open) c.popClip();
+        open = false;
+        cur = ci;
+        if (ci >= 0 && size_t(4 * ci + 3) < sn.clips.size()) {
+            const double* q = &sn.clips[size_t(4 * ci)];
+            c.pushClip(ox + (q[0] - sn.x0) * k, oy + (q[1] - sn.y0) * k, (q[2] - q[0]) * k, (q[3] - q[1]) * k);
+            open = true;
+        }
+    };
+    auto drawText = [&](const SnapText& t) {
+        setClip(t.clip);
+        c.textFit(ox + (t.x - sn.x0) * k, oy + (t.y - sn.y0) * k, t.s, t.size * k, t.width * k, t.vertical, col(t.color));
+    };
+    std::vector<double> buf;
+    size_t ti = 0;
+    for (size_t r = 0; r < sn.runs.size(); ++r) {
+        while (ti < sn.texts.size() && sn.texts[ti].order <= int(r)) drawText(sn.texts[ti++]);
+        const Snapshot::Run& R = sn.runs[r];
+        if (R.ntri <= 0 || size_t(6 * (R.tri0 + R.ntri)) > sn.xy.size()) continue;
+        setClip(R.clip);
+        buf.resize(size_t(6 * R.ntri));
+        const double* q = &sn.xy[size_t(6 * R.tri0)];
+        for (int i = 0; i < 3 * R.ntri; ++i) {
+            buf[size_t(2 * i)] = ox + (q[2 * i] - sn.x0) * k;
+            buf[size_t(2 * i + 1)] = oy + (q[2 * i + 1] - sn.y0) * k;
+        }
+        c.fillTriangles(buf.data(), R.ntri, col(R.color));
+    }
+    while (ti < sn.texts.size()) drawText(sn.texts[ti++]);
+    setClip(-2);
+    c.popClip();
+    c.end();
+}
+
 void render(const Figure& fIn, const Style& st, Canvas& c) {
+    if (st.exact && !fIn.snap.empty()) { renderSnapshot(fIn.snap, st, c); return; }
     if (st.palette >= 0) {
         Style s2 = st;
         s2.palette = -1;
@@ -521,8 +873,10 @@ void render(const Figure& fIn, const Style& st, Canvas& c) {
             const PanelLayout& q = L[size_t(i)];
             double l = q.y.labelW + X.pad * 2 + (p.ylabel.empty() ? 0 : X.lineH + X.fs * 0.1);
             double r = q.hasY2 ? q.y2.labelW + X.pad * 2 + (p.y2label.empty() ? 0 : X.lineH + X.fs * 0.1) : X.fs * 0.9;
+            if (q.hasCb) r = (q.hasY2 ? r : 0) + q.cbW + X.fs * 0.3;
             double t = (st.titles && !p.title.empty() ? X.lineH * 1.1 : 0) + (q.y.exp || (q.hasY2 && q.y2.exp) ? X.lineH : X.fs * 0.5);
             double b = X.pad + X.tfs * 1.05 + (p.xlabel.empty() && !q.x.exp ? 0 : X.lineH * 1.05) + X.fs * 0.15;
+            if (p.noAxes) { l = X.fs * 0.4; b = X.fs * 0.4; if (!q.hasCb) r = X.fs * 0.4; }
             ml = std::max(ml, l); mr = std::max(mr, r); mt = std::max(mt, t); mb = std::max(mb, b);
         }
     }
@@ -626,6 +980,27 @@ public:
         }
         o << "</text>\n";
     }
+    void fillTriangles(const double* xy, int nTri, uint32_t color) override {
+        if (nTri <= 0 || alphaOf(color) <= 0) return;
+        o << "<path d=\"";
+        for (int t = 0; t < nTri; ++t) {
+            const double* q = xy + 6 * t;
+            o << "M" << num(q[0]) << " " << num(q[1]) << "L" << num(q[2]) << " " << num(q[3]) << "L" << num(q[4]) << " " << num(q[5]) << "Z";
+        }
+        o << "\" fill=\"" << hex(color) << "\"";
+        if (alphaOf(color) < 0.999) o << " fill-opacity=\"" << num(alphaOf(color)) << "\"";
+        o << "/>\n";
+    }
+    void textFit(double x, double y, const std::string& s, double size, double widthPt, bool vertical, uint32_t color) override {
+        if (s.empty()) return;
+        o << "<text";
+        if (vertical) o << " transform=\"translate(" << num(x) << "," << num(y) << ") rotate(-90)\" x=\"0\" y=\"0\"";
+        else o << " x=\"" << num(x) << "\" y=\"" << num(y) << "\"";
+        o << " font-size=\"" << num(size) << "\" fill=\"" << hex(color) << "\"";
+        if (alphaOf(color) < 0.999) o << " fill-opacity=\"" << num(alphaOf(color)) << "\"";
+        if (widthPt > 0) o << " textLength=\"" << num(widthPt) << "\" lengthAdjust=\"spacingAndGlyphs\"";
+        o << " xml:space=\"preserve\">" << xmlEsc(s) << "</text>\n";
+    }
     void pushClip(double x, double y, double w, double h) override {
         ++clipId;
         o << "<clipPath id=\"c" << clipId << "\"><rect x=\"" << num(x) << "\" y=\"" << num(y) << "\" width=\"" << num(w) << "\" height=\"" << num(h)
@@ -721,6 +1096,37 @@ public:
         }
         o << "ET\n";
     }
+    std::vector<int> alphas;   // ExtGState /Ann (fill + stroke alpha nn %) used by the content
+    bool alphaOn(uint32_t c) {   // opens "q /Ann gs" for a translucent colour; returns true if Q is needed
+        const int a = int(std::lround(alphaOf(c) * 100));
+        if (a >= 100) return false;
+        if (std::find(alphas.begin(), alphas.end(), a) == alphas.end()) alphas.push_back(a);
+        o << "q /A" << a << " gs\n";
+        return true;
+    }
+    void fillTriangles(const double* xy, int nTri, uint32_t color) override {
+        if (nTri <= 0 || alphaOf(color) <= 0) return;
+        const bool q = alphaOn(color);
+        rgb(color, false);
+        for (int t = 0; t < nTri; ++t) {
+            const double* p = xy + 6 * t;
+            o << num(p[0]) << " " << num(H - p[1]) << " m " << num(p[2]) << " " << num(H - p[3]) << " l " << num(p[4]) << " " << num(H - p[5]) << " l h\n";
+        }
+        o << "f\n";
+        if (q) o << "Q\n";
+    }
+    void textFit(double x, double y, const std::string& s, double size, double widthPt, bool vertical, uint32_t color) override {
+        if (s.empty() || alphaOf(color) <= 0) return;
+        const double w = textWidth(s, size);
+        const double tz = (w > 0 && widthPt > 0) ? std::clamp(100.0 * widthPt / w, 40.0, 250.0) : 100.0;
+        const bool q = alphaOn(color);
+        rgb(color, false);
+        o << "BT\n";
+        if (vertical) o << "0 1 -1 0 " << num(x) << " " << num(H - y) << " Tm\n";
+        else o << "1 0 0 1 " << num(x) << " " << num(H - y) << " Tm\n";
+        o << "/F1 " << num(size) << " Tf " << num(tz) << " Tz " << pdfStr(s) << " Tj 100 Tz\nET\n";
+        if (q) o << "Q\n";
+    }
     void pushClip(double x, double y, double w, double h) override {
         o << "q " << num(x) << " " << num(H - y - h) << " " << num(w) << " " << num(h) << " re W n\n";
     }
@@ -754,7 +1160,10 @@ bool writePDF(const Figure& f, const Style& s, const std::string& path, std::str
     std::strftime(date, sizeof(date), "D:%Y%m%d%H%M%S", std::gmtime(&t));
     obj("<< /Type /Catalog /Pages 2 0 R >>");
     obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
-    obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + num(c.W) + " " + num(c.H) + "] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>");
+    std::string gs;
+    for (int a : c.alphas) gs += " /A" + std::to_string(a) + " << /Type /ExtGState /ca " + num(a / 100.0) + " /CA " + num(a / 100.0) + " >>";
+    if (!gs.empty()) gs = " /ExtGState <<" + gs + " >>";
+    obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + num(c.W) + " " + num(c.H) + "] /Resources << /Font << /F1 5 0 R >>" + gs + " >> /Contents 4 0 R >>");
     obj("<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "endstream");
     obj(std::string("<< /Type /Font /Subtype /Type1 /BaseFont /") + (s.font == 1 ? "Times-Roman" : "Helvetica") + " /Encoding /WinAnsiEncoding >>");
     obj(std::string("<< /Producer (ResSim Studio) /Creator (ResSim Studio figure export) /Title ") + pdfStr(f.name.empty() ? "Figure" : f.name) +
@@ -834,6 +1243,15 @@ void Recorder::series(const std::string& label, const double* x, const double* y
     s.legend = legend && !s.label.empty();
     panel_.series.push_back(std::move(s));
 }
+Panel* Recorder::openPanel() { return active_ && panelOpen_ ? &panel_ : nullptr; }
+Panel* Recorder::lastPanel() { return active_ && !panelOpen_ && !cur_.panels.empty() ? &cur_.panels.back() : nullptr; }
+uint32_t Heatmap::colorAt(double val) const {
+    if (lut.empty()) return 0xFF808080u;
+    double t = vmax != vmin ? (val - vmin) / (vmax - vmin) : 0.0;
+    if (!std::isfinite(t)) t = 0;
+    t = std::min(1.0, std::max(0.0, t));
+    return lut[std::min(lut.size() - 1, size_t(t * double(lut.size() - 1) + 0.5))] | 0xFF000000u;
+}
 Series* Recorder::openSeries() { return active_ && panelOpen_ && !panel_.series.empty() ? &panel_.series.back() : nullptr; }
 void Recorder::vline(double x) { if (active_ && panelOpen_) panel_.vlines.push_back(x); }
 void Recorder::limits(double x0, double x1, double y0, double y1, bool hasY2, double y20, double y21) {
@@ -841,6 +1259,10 @@ void Recorder::limits(double x0, double x1, double y0, double y1, bool hasY2, do
     panel_.hasLimits = true;
     panel_.x0 = x0; panel_.x1 = x1; panel_.y0 = y0; panel_.y1 = y1;
     panel_.hasY2 = hasY2; panel_.y20 = y20; panel_.y21 = y21;
+}
+void Recorder::axisScale(bool logX, bool logY, bool logY2) {
+    if (!active_ || !panelOpen_) return;
+    panel_.logX = logX; panel_.logY = logY; panel_.logY2 = logY2;
 }
 void Recorder::endPanel() {
     if (!active_ || !panelOpen_) return;

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ressim"
+version = "1.0.0"
+description = "Python API of the ResSim reservoir simulation engine (ctypes wrapper of ressim.dll / libressim.so)"
+requires-python = ">=3.8"
+optional-dependencies = { full = ["numpy", "pandas", "matplotlib"] }
+
+[tool.setuptools]
+packages = ["ressim"]
+
+[tool.setuptools.package-data]
+ressim = ["*.dll", "*.so", "*.dylib"]

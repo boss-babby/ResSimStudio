@@ -1,0 +1,6 @@
+h2b_10_SG t60 33.58 t90 71.44 | DONE steps 837 newton 7626 cuts 272  FPR 301.5828  42.27 s
+h2b_5_SG t60 28.77 t90 69.60 | DONE steps 1015 newton 9169 cuts 382  FPR 301.5708  105.34 s
+h2b_2.5_SG t60 26.97 t90 62.32 | DONE steps 969 newton 8747 cuts 307  FPR 301.7068  215.17 s
+h2b_10_SGL t60 25.49 t90 58.96 | DONE steps 532 newton 5878 cuts 147  FPR 301.7268  34.72 s
+h2b_5_SGL t60 26.34 t90 59.78 | DONE steps 683 newton 7831 cuts 164  FPR 301.7168  93.12 s
+h2b_2.5_SGL t60 26.00 t90 60.21 | DONE steps 853 newton 8768 cuts 256  FPR 301.7278  219.75 s

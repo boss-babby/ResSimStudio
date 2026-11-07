@@ -1,0 +1,7 @@
+log,objective,strict_violations_from_log,pairs,max_ratio,violations_full_precision
+h7_200.log,RSF event count,30,200,1.2,30
+h7_200.log,RSF moment,80,200,1.2658227848101267,82
+h7_200.log,Dieterich (same pressure),0,200,0.9998790663925505,0
+h7b.log,RSF event count,14,60,1.3243243243243243,14
+h7b.log,RSF moment,18,60,1.2495164410058026,19
+h7b.log,Dieterich (same pressure),0,60,0.9998089780324737,0

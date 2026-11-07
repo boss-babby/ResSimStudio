@@ -1,0 +1,113 @@
+-- C25 example: CO2 storage (compositional CO2STORE core) with FE geomechanics, fault mechanics and fracture growth.
+--   GEOMECH   two-way sequential FE geomechanics: pore volume and permeability of the CO2STORE cells follow the FE
+--             porosity / stress after every report step (mole-conservative); stress, strain, uplift and failure maps
+--   FAULTMECH a vertical fault F1 at x = 50 m (between columns 10 and 11) with the FE stress change (STRESSFIELD ... FE):
+--             Coulomb stress, Dieterich seismicity, two-way fault permeability
+--   HFGROW    the injection fracture HF1 (bottom layers) grows towards the fault by LEFM against the FE minimum stress
+--             (tight 2 mD formation, 40000 sm3/d, BHP limit 230 bar; poro-elastic stressing arrests the growth)
+-- OPM Flow ignores the '-- RESSIM:' lines.
+-- base: CO2 storage in a brine aquifer (OPM Flow CO2STORE format, after opm-tests co2store/CO2STORE.DATA)
+-- 2-D vertical section 100 m x 100 m, CO2 injected at the bottom; the plume rises, spreads under the top
+-- and dissolves into the brine. In OPM CO2STORE decks the OIL phase is the brine.
+-- Runs on the ResSim CO2STORE core (Spycher-Pruess / Duan-Sun) and on OPM Flow.
+RUNSPEC
+TITLE
+CO2 storage + FE geomechanics + fault + fracture growth (C25)
+DIMENS
+ 20 1 20 /
+OIL
+GAS
+CO2STORE
+METRIC
+START
+ 1 'JAN' 2025 /
+WELLDIMS
+ 1 20 1 1 /
+FAULTDIM
+ 1 /
+TABDIMS
+ 1 1 40 20 /
+UNIFOUT
+
+GRID
+DX
+ 400*5 /
+DY
+ 400*100 /
+DZ
+ 400*5 /
+TOPS
+ 20*1000 /
+PORO
+ 400*0.3 /
+PERMX
+ 400*2 /
+PERMY
+ 400*2 /
+PERMZ
+ 400*0.2 /
+-- open lateral boundary: large pore volume in the last column (aquifer support)
+MULTPV
+ 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 19*1 1e4 /
+
+FAULTS
+ 'F1' 10 10 1 1 1 20 'X' /
+/
+-- RESSIM: GEOMECH ON 1 5e+09 0.25 1 1e-05 0 2 1 1 500 300 300 5e+09 0.25 1e-05 1 22600 0.5 1e+06 30 5e+05 4 0.0001 1e-08
+-- RESSIM: HFRAC HF1 0.5 50 60 50 1085 1100 0.002 0 0.5 0 0
+-- RESSIM: HFGROW HF1 0.5 160 0.1 6 1 FESTRESS
+-- RESSIM: STRESSFIELD 0.226 0.7 0.95 30 0.5 0 FE
+-- RESSIM: FAULTMECH F1 0.6 0 0 100 5 1.0 -1.0 5
+
+PROPS
+ROCK
+ 200 1e-6 /
+SGOF
+ 0     0      1      0
+ 0.05  0      0.85   0
+ 0.2   0.03   0.55   0
+ 0.4   0.15   0.25   0
+ 0.6   0.35   0.07   0
+ 0.8   0.6    0      0
+ 1.0   1.0    0      0
+/
+SALINITY
+ 0.7 /   -- mol NaCl / kg H2O (~ 39 000 ppm)
+
+SOLUTION
+EQUIL
+-- datum  p(bar) WOC  Pc   GOC   Pc
+ 1000    100    1100  0    900   0   1 1 0 /
+RTEMPVD
+ 1000 50
+ 1200 50
+/
+RSVD
+ 1000 0
+ 1200 0
+/
+
+SUMMARY
+FPR
+FGIP
+FGIT
+FGIR
+
+SCHEDULE
+WELSPECS
+ 'INJ' 'G1' 1 1 1* 'GAS' /
+/
+COMPDAT
+ 'INJ' 1 1 18 20 'OPEN' 1* 1* 0.2 /
+/
+WCONINJE
+ 'INJ' 'GAS' 'OPEN' 'RATE' 40000 1* 230 /
+/
+TSTEP
+ 12*30.4 /
+WCONINJE
+ 'INJ' 'GAS' 'SHUT' 'RATE' 0 1* 230 /
+/
+TSTEP
+ 12*30.4 24*91.3 /
+END

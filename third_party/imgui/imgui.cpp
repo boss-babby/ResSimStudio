@@ -7838,8 +7838,11 @@ void ImGui::RenderWindowDecorations(ImGuiWindow* window, const ImRect& title_bar
 
 // When inside a dock node, this is handled in DockNodeCalcTabBarLayout() instead.
 // Render title text, collapse button, close button
+const char* (*GImGuiTitleTranslate)(const char* name) = NULL;   // ResSim C49
+
 void ImGui::RenderWindowTitleBarContents(ImGuiWindow* window, const ImRect& title_bar_rect, const char* name, bool* p_open)
 {
+    if (GImGuiTitleTranslate && name) name = GImGuiTitleTranslate(name);   // ResSim C49: display only
     ImGuiContext& g = *GImGui;
     ImGuiStyle& style = g.Style;
     ImGuiWindowFlags flags = window->Flags;
@@ -19989,7 +19992,7 @@ static void ImGui::DockNodeUpdateTabBar(ImGuiDockNode* node, ImGuiWindow* host_w
 
         // Note that TabItemEx() calls TabBarCalcTabID() so our tab item ID will ignore the current ID stack (rightly so)
         bool tab_open = true;
-        TabItemEx(tab_bar, window->Name, window->HasCloseButton ? &tab_open : NULL, tab_item_flags, window);
+        TabItemEx(tab_bar, GImGuiTitleTranslate ? GImGuiTitleTranslate(window->Name) : window->Name, window->HasCloseButton ? &tab_open : NULL, tab_item_flags, window);   // ResSim C49
         if (!tab_open)
             node->WantCloseTabId = window->TabId;
         if (tab_bar->VisibleTabId == window->TabId)

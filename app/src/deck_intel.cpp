@@ -271,11 +271,49 @@ bool keywordLine(const std::string& line, std::string* name) {
     size_t k = j;
     while (k < line.size() && (line[k] == ' ' || line[k] == '\t' || line[k] == '\r')) ++k;
     if (k < line.size() && !(line[k] == '-' && k + 1 < line.size() && line[k + 1] == '-')) {
-        // ECLIPSE ignores text after a keyword: same rule as the engine parser - accepted for section headers
-        // ("PROPS =========") and for decorations that start with '='; otherwise the line is data
-        if (j == 0 || k == j || !(line[k] == '=' || isSectionName(upper(line.substr(0, j))))) return false;
+        // ECLIPSE ignores text after a keyword: accept it for section headers ("PROPS =====") and for
+        // decorations starting with '=' (same rule as the deck parser); otherwise the line is data
+        if (k == j) return false;
+        if (!(isSectionName(upper(line.substr(0, j))) || line[k] == '=')) return false;
     }
     if (name) *name = line.substr(0, j);
+    return true;
+}
+
+// helpers for keyword lines with trailing text
+static std::string codePart(const std::string& line) {
+    char q = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        if (q) { if (line[i] == q) q = 0; continue; }
+        if (line[i] == '\'' || line[i] == '"') { q = line[i]; continue; }
+        if (line[i] == '-' && i + 1 < line.size() && line[i + 1] == '-') return line.substr(0, i);
+    }
+    return line;
+}
+static bool lineHasData(const std::string& line) {
+    for (char ch : codePart(line)) if (!std::isspace((unsigned char)ch)) return true;
+    return false;
+}
+static bool lineClosesRecord(const std::string& line) {
+    const std::string c = codePart(line);
+    char q = 0;
+    for (char ch : c) { if (q) { if (ch == q) q = 0; continue; } if (ch == '\'' || ch == '"') q = ch; else if (ch == '/') return true; }
+    return false;
+}
+static bool stampedKeyword(const std::string& line, const std::string& section, std::string* name) {
+    if (line.empty() || !std::isupper((unsigned char)line[0])) return false;
+    size_t j = 0;
+    while (j < line.size() && !std::isspace((unsigned char)line[j])) ++j;
+    if (j > 8 || j == line.size()) return false;
+    const std::string w = line.substr(0, j);
+    const deck::KeywordSpec* s = deck::findKeyword(w);
+    if (!s) return false;
+    if (std::string(s->name) == "(summary)") {
+        static const char* kSec[8] = {"RUNSPEC", "GRID", "EDIT", "PROPS", "REGIONS", "SOLUTION", "SUMMARY", "SCHEDULE"};
+        int bit = -1; for (int k = 0; k < 8; ++k) if (section == kSec[k]) bit = k;
+        if (bit < 0 || !(s->sections & (1u << bit))) return false;
+    }
+    if (name) *name = w;
     return true;
 }
 
@@ -285,15 +323,45 @@ Outline buildOutline(const std::vector<std::string>& lines) {
     std::string name;
     std::string rawEnd;   // inside ACTIONX / PYINPUT blocks: keyword lines are still keywords (ACTIONX) or raw code
     bool inCode = false;
+    bool closed = true;   // no record open (a keyword with trailing text may start here)
+    bool justKw = false;
+    bool slashOpen = false;   // a "records until an empty record" list (EQUALS, COPY, ...) is not terminated yet
+    std::string section = "RUNSPEC";
     for (int l = 0; l < (int)lines.size(); ++l) {
         if (inCode) {
             if (lines[l].compare(0, rawEnd.size(), rawEnd) == 0) { inCode = false; o.items.push_back({l, rawEnd, false}); }
             continue;
         }
-        if (!keywordLine(lines[l], &name)) continue;
+        if (!keywordLine(lines[l], &name)) {
+            // ECLIPSE reads keywords from columns 1-8 and ignores the rest of the line; old decks carry generator
+            // stamps there ("PVDG       2 TABLES   20 P NODES ...   FIELD   12:13  2 JAN 90"). Accepted for known
+            // keywords when no record is open (same rule as the deck parser).
+            // Inside an open EQUALS / COPY / ADD list a complete record starting with an array name
+            // ("SWL 0.05 1 46 1 112 2 2 /") stays data.
+            if (closed && !(slashOpen && lineClosesRecord(lines[l])) && stampedKeyword(lines[l], section, &name)) {}
+            else {
+                if (lineHasData(lines[l])) {
+                    std::string c = codePart(lines[l]);
+                    c.erase(0, c.find_first_not_of(" \t\r"));
+                    if (!c.empty() && c[0] == '/' && (closed || justKw)) slashOpen = false;   // empty record
+                    closed = lineClosesRecord(lines[l]);
+                    justKw = false;
+                }
+                continue;
+            }
+        }
         const std::string u = upper(name);
+        if (!closed && !isSectionName(u) && !deck::findKeyword(u)) {
+            // an unknown word in column 1 while a record is open is data (RPTRST / RPTSCHED mnemonics)
+            closed = lineClosesRecord(lines[l]);
+            continue;
+        }
         o.items.push_back({l, name, isSectionName(u)});
+        if (isSectionName(u)) section = u;
         const deck::KeywordSpec* s = deck::findKeyword(u);
+        closed = isSectionName(u) || (s && s->kind == deck::KwSize::None);
+        slashOpen = s && s->kind == deck::KwSize::Slash;
+        justKw = true;
         if (s && s->kind == deck::KwSize::Code && s->end) { inCode = true; rawEnd = s->end; }
     }
     return o;
@@ -464,7 +532,9 @@ std::vector<Diag> lint(const std::vector<std::string>& lines, const Outline& o) 
         const KwInfo* info = docs.find(u);
         const deck::KeywordSpec* spec = deck::findKeyword(u);
         if (!info && !spec) {
-            out.push_back({it.line, 0, nameEnd, 1, "unknown keyword " + u});
+            if (section == "SUMMARY" && std::string("FWGRBCASN").find(u[0]) != std::string::npos)
+                out.push_back({it.line, 0, nameEnd, 0, u + ": summary vector not in the OPM keyword database (ECLIPSE-specific?) - kept as written"});
+            else out.push_back({it.line, 0, nameEnd, 1, "unknown keyword " + u});
             continue;
         }
         if (info && !section.empty() && !info->validIn(section))
@@ -515,7 +585,9 @@ std::vector<Diag> lint(const std::vector<std::string>& lines, const Outline& o) 
         if (open) {
             out.push_back({curStartLine, 0, (int)lines[curStartLine].size(), 2, u + ": record is not terminated by '/'"});
         } else if (isListKind(kind) && anyData && !emptyRecord) {
-            out.push_back({it.line, 0, nameEnd, 2, u + ": list must be closed by an empty record '/'"});
+            // ECLIPSE accepts the next keyword in place of the closing '/' (FOAM / BRILLIG examples: AQUFETP, BGSAT, ...)
+            if (i + 1 < o.items.size()) out.push_back({it.line, 0, nameEnd, 0, u + ": list not closed by an empty record '/' (accepted: the next keyword follows)"});
+            else out.push_back({it.line, 0, nameEnd, 2, u + ": list must be closed by an empty record '/'"});
         } else if (isListKind(kind) && !anyData) {
             out.push_back({it.line, 0, nameEnd, 2, u + ": missing records and the closing '/'"});
         }

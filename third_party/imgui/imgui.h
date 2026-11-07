@@ -3713,6 +3713,14 @@ struct ImDrawList
     IMGUI_API void  _AddPolyline(const ImVec2* points, int num_points, ImU32 col, float thickness, ImDrawFlags flags, float max_inner_offset);
 };
 
+// ResSim extension: text capture for vector ("exact as on screen") plot export. When GImDrawListTextHook is set and
+// GImDrawListTextHookList == the draw list, ImDrawList::AddText() reports each string (UTF-8, not null-terminated) before
+// its glyphs are added. 'clip' is the effective clip rectangle; 'vertical' is used by ImPlot's rotated axis labels.
+typedef void (*ImDrawListTextHookFn)(ImDrawList* dl, ImFont* font, float font_size, const ImVec2& pos, ImU32 col,
+                                     const char* text_begin, const char* text_end, const ImVec4& clip, bool vertical);
+extern IMGUI_API ImDrawListTextHookFn GImDrawListTextHook;
+extern IMGUI_API ImDrawList*          GImDrawListTextHookList;
+
 // All draw data to render a Dear ImGui frame
 // (NB: the style and the naming convention here is a little inconsistent, we currently preserve them for backward compatibility purpose,
 // as this is one of the oldest structure exposed by the library! Basically, ImDrawList == CmdList)
@@ -4678,3 +4686,7 @@ typedef ImFontAtlasRect ImFontAtlasCustomRect;
 #endif
 
 #endif // #ifndef IMGUI_DISABLE
+
+// ResSim C49: display-only translation of window titles and docked-window tab labels (the window name, hence the ImGui ID,
+// the saved layout and popup IDs stay unchanged); NULL = untranslated
+extern const char* (*GImGuiTitleTranslate)(const char* name);

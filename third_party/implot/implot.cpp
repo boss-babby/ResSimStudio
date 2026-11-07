@@ -270,6 +270,8 @@ ImPlotStyle::ImPlotStyle() {
 // Style
 //-----------------------------------------------------------------------------
 
+const char* (*GImPlotTranslate)(const char* text) = nullptr;   // ResSim C48
+
 namespace ImPlot {
 
 const char* GetStyleColorName(ImPlotCol col) {
@@ -393,6 +395,8 @@ void AddTextVertical(ImDrawList *DrawList, ImVec2 pos, ImU32 col, const char *te
     // Align to be pixel perfect
     pos.x = ImFloor(pos.x);
     pos.y = ImFloor(pos.y);
+    if (GImDrawListTextHook != nullptr && GImDrawListTextHookList == DrawList)   // ResSim: exact plot export
+        GImDrawListTextHook(DrawList, g.Font, g.FontSize, pos, col, text_begin, text_end, DrawList->_CmdHeader.ClipRect, true);
     const char* s = text_begin;
     int chars_exp = (int)(text_end - s);
     int chars_rnd = 0;
@@ -1553,6 +1557,32 @@ void ShowSubplotsContextMenu(ImPlotSubplot& subplot) {
     }
 }
 
+ImPlotCaptureHooks& GetCaptureHooks() { static ImPlotCaptureHooks h; return h; }
+
+// ResSim: geometry capture of one plot (exact export) - see ImPlotCaptureHooks::Geometry
+namespace {
+struct GeoState { bool On = false; ImDrawList* DL = nullptr; int Idx0 = 0; ImDrawFlags Flags = 0; int LastFrame = -1; ImGuiWindow* LastWin = nullptr; };
+GeoState& Geo() { static GeoState g; return g; }
+void GeoBegin(ImDrawList* dl) {
+    GeoState& g = Geo();
+    if (g.On && g.DL) { g.DL->Flags = g.Flags; }   // stale (plot culled after BeginPlot) - restore
+    g.On = true; g.DL = dl; g.Idx0 = dl->IdxBuffer.Size; g.Flags = dl->Flags;
+    dl->Flags &= ~(ImDrawFlags_AAFill | ImDrawFlags_AALines | ImDrawFlags_AALineEnds | ImDrawFlags_UseTexForRoundCorners);
+    GImDrawListTextHookList = dl;
+}
+void GeoEnd(const ImRect& frame, int kind) {
+    GeoState& g = Geo();
+    if (!g.On || !g.DL) return;
+    g.DL->Flags = g.Flags;
+    GImDrawListTextHookList = nullptr;
+    ImPlotCaptureHooks& H = GetCaptureHooks();
+    if (H.Geometry) H.Geometry(g.DL, g.Idx0, g.DL->IdxBuffer.Size, ImVec4(frame.Min.x, frame.Min.y, frame.Max.x, frame.Max.y), kind, H.User);
+    g.On = false;
+    g.LastFrame = ImGui::GetFrameCount();
+    g.LastWin = GImGui->CurrentWindow;
+}
+} // namespace
+
 void ShowPlotContextMenu(ImPlotPlot& plot) {
     ImPlotContext& gp = *GImPlot;
     const bool owns_legend = gp.CurrentItems == &plot.Items;
@@ -1621,6 +1651,10 @@ void ShowPlotContextMenu(ImPlotPlot& plot) {
             ShowSubplotsContextMenu(*gp.CurrentSubplot);
             ImGui::EndMenu();
         }
+    }
+    {   // ResSim: extra items (single-plot export)
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.ContextMenu) { ImGui::Separator(); H.ContextMenu(plot.ID, plot.HasTitle() ? plot.GetTitle() : "", H.User); }
     }
 }
 
@@ -2188,8 +2222,8 @@ void SetupAxis(ImAxis idx, const char* label, ImPlotAxisFlags flags) {
     axis.PreviousFlags = flags;
     // enable axis
     axis.Enabled = true;
-    // set label
-    plot.SetAxisLabel(axis,label);
+    // set label (ResSim C48: translated display text)
+    plot.SetAxisLabel(axis, (label && GImPlotTranslate) ? GImPlotTranslate(label) : label);
     // cache colors
     UpdateAxisColors(axis);
 }
@@ -2450,6 +2484,16 @@ bool BeginPlot(const char* title_id, const ImVec2& size, ImPlotFlags flags) {
     ImPlotPlot &plot         = *gp.CurrentPlot;
     plot.ID                  = ID;
     plot.Items.ID            = ID - 1;
+    {   // ResSim capture
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        H.Active = H.Target != 0 && H.Target == ID;
+        if (H.Active && H.Begin) {
+            const char* e = ImGui::FindRenderedTextEnd(title_id);
+            char tb[256]; const int nn = (int)ImMin<size_t>((size_t)(e - title_id), sizeof(tb) - 1);
+            memcpy(tb, title_id, (size_t)nn); tb[nn] = 0;
+            H.Begin(ID, tb, H.User);
+        }
+    }
     plot.JustCreated         = just_created;
     plot.SetupLocked         = false;
 
@@ -2484,7 +2528,7 @@ bool BeginPlot(const char* title_id, const ImVec2& size, ImPlotFlags flags) {
 
     // clear text buffers
     plot.ClearTextBuffer();
-    plot.SetTitle(title_id);
+    plot.SetTitle((title_id && GImPlotTranslate) ? GImPlotTranslate(title_id) : title_id);   // ResSim C48
 
     // set frame size
     ImVec2 frame_size;
@@ -2503,6 +2547,11 @@ bool BeginPlot(const char* title_id, const ImVec2& size, ImPlotFlags flags) {
     if (!ImGui::ItemAdd(plot.FrameRect, plot.ID, &plot.FrameRect) && !gp.CurrentSubplot) {
         ResetCtxForNextPlot(GImPlot);
         return false;
+    }
+
+    {   // ResSim: exact export - capture this plot's draw geometry
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.Geometry && (H.Active || H.GeomAll)) GeoBegin(Window->DrawList);
     }
 
     // setup items (or dont)
@@ -2832,12 +2881,51 @@ void EndPlot() {
     ImPlotContext& gp = *GImPlot;
     IM_ASSERT_USER_ERROR(gp.CurrentPlot != nullptr, "Mismatched BeginPlot()/EndPlot()!");
 
+    if (GetCaptureHooks().PreEnd) GetCaptureHooks().PreEnd(GetCaptureHooks().User);   // ResSim C40
+
     SetupLock();
 
     ImGuiContext &G       = *GImGui;
     ImPlotPlot &plot      = *gp.CurrentPlot;
     ImGuiWindow * Window  = G.CurrentWindow;
     ImDrawList & DrawList = *Window->DrawList;
+
+    {   // ResSim: single-plot capture (axes + end) and the hover export button
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.Active) {
+            if (H.Axis)
+                for (int a = 0; a < ImAxis_COUNT; ++a) {
+                    const ImPlotAxis& ax = plot.Axes[a];
+                    if (!ax.Enabled) continue;
+                    H.Axis(a, ax.LabelOffset != -1 ? plot.GetAxisLabel(ax) : "", ax.Range.Min, ax.Range.Max, H.User);
+                }
+            // (End is reported at the very end of EndPlot, after the geometry of the whole plot is complete)
+        }
+        // (no IsAnyItemActive() test: the press on the button also activates the plot's own pan/drag item in the same frame,
+        //  which made the click invisible here - the button now reacts to the press itself)
+        if (H.HoverButton && H.Begin && !Geo().On && (plot.Hovered || plot.Held)) {
+            const float bs = ImGui::GetFontSize() * 1.15f;
+            const ImVec2 b1(plot.PlotRect.Max.x - 3, plot.PlotRect.Min.y + 3), b0(b1.x - bs, b1.y);
+            const ImRect br(b0, ImVec2(b1.x, b1.y + bs));
+            const bool over = br.Contains(ImGui::GetIO().MousePos);
+            const ImU32 bg = ImGui::GetColorU32(over ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+            const ImU32 fg = ImGui::GetColorU32(ImGuiCol_Text);
+            DrawList.AddRectFilled(br.Min, br.Max, bg, 3.0f);
+            // download glyph: arrow into a tray
+            const float cx = (br.Min.x + br.Max.x) * 0.5f, t = br.Min.y + bs * 0.2f, m = br.Min.y + bs * 0.62f, w = bs * 0.22f, th = ImMax(1.0f, bs * 0.09f);
+            DrawList.AddLine(ImVec2(cx, t), ImVec2(cx, m), fg, th);
+            DrawList.AddLine(ImVec2(cx - w, m - w), ImVec2(cx, m), fg, th);
+            DrawList.AddLine(ImVec2(cx + w, m - w), ImVec2(cx, m), fg, th);
+            const float ty = br.Min.y + bs * 0.8f, tx0 = br.Min.x + bs * 0.22f, tx1 = br.Max.x - bs * 0.22f;
+            DrawList.AddLine(ImVec2(tx0, ty - bs * 0.12f), ImVec2(tx0, ty), fg, th);
+            DrawList.AddLine(ImVec2(tx0, ty), ImVec2(tx1, ty), fg, th);
+            DrawList.AddLine(ImVec2(tx1, ty), ImVec2(tx1, ty - bs * 0.12f), fg, th);
+            if (over) {
+                ImGui::SetTooltip("Export this plot (PDF / SVG / PNG / CSV)");
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left)) H.Target = plot.ID;
+            }
+        }
+    }
     const ImGuiIO &   IO  = ImGui::GetIO();
 
     // FINAL RENDER -----------------------------------------------------------
@@ -2978,7 +3066,7 @@ void EndPlot() {
     }
 
     // render mouse pos
-    if (!ImHasFlag(plot.Flags, ImPlotFlags_NoMouseText) && (plot.Hovered || ImHasFlag(plot.MouseTextFlags, ImPlotMouseTextFlags_ShowAlways))) {
+    if (!ImHasFlag(plot.Flags, ImPlotFlags_NoMouseText) && !Geo().On && (plot.Hovered || ImHasFlag(plot.MouseTextFlags, ImPlotMouseTextFlags_ShowAlways))) {
 
         const bool no_aux = ImHasFlag(plot.MouseTextFlags, ImPlotMouseTextFlags_NoAuxAxes);
         const bool no_fmt = ImHasFlag(plot.MouseTextFlags, ImPlotMouseTextFlags_NoFormat);
@@ -3315,6 +3403,15 @@ void EndPlot() {
 
     // mark the plot as initialized, i.e. having made it through one frame completely
     plot.Initialized = true;
+    {   // ResSim: finish the exact-export geometry and the data capture of this plot
+        if (Geo().On) GeoEnd(plot.FrameRect, 0);
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.Active) {
+            if (H.End) H.End(H.User);
+            H.Active = false;
+            H.Target = 0;
+        }
+    }
     // Pop ImGui::PushID at the end of BeginPlot
     ImGui::PopID();
     // Reset context for next plot
@@ -4720,6 +4817,14 @@ void ColormapScale(const char* label, double scale_min, double scale_max, const 
         frame_size.y = gp.Style.PlotMinSize.y;
 
     ImPlotRange range(ImMin(scale_min,scale_max), ImMax(scale_min,scale_max));
+    {   // ResSim C23: native colour scale for the publication export
+        ImPlotCaptureHooks& H = GetCaptureHooks();
+        if (H.ColorScale) {
+            ImU32 lut[256];
+            for (int k = 0; k < 256; ++k) lut[k] = SampleColormapU32(k / 255.0f, cmap);
+            H.ColorScale(label, scale_min, scale_max, lut, 256, H.User);
+        }
+    }
     gp.CTicker.Reset();
     Locator_Default(gp.CTicker, range, frame_size.y, true, Formatter_Default, (void*)format);
 
@@ -4740,6 +4845,9 @@ void ColormapScale(const char* label, double scale_min, double scale_max, const 
     ImGui::ItemSize(bb_frame);
     if (!ImGui::ItemAdd(bb_frame, ID, &bb_frame))
         return;
+    // ResSim: a colour scale drawn right after a captured plot (same window, same frame) joins the exact export
+    const bool geo_scale = GetCaptureHooks().Geometry && Geo().LastFrame == ImGui::GetFrameCount() && Geo().LastWin == Window && !Geo().On;
+    if (geo_scale) GeoBegin(&DrawList);
 
     ImGui::RenderFrame(bb_frame.Min, bb_frame.Max, GetStyleColorU32(ImPlotCol_FrameBg), true, G.Style.FrameRounding);
 
@@ -4788,6 +4896,7 @@ void ColormapScale(const char* label, double scale_min, double scale_max, const 
     }
     DrawList.AddRect(bb_grad.Min, bb_grad.Max, GetStyleColorU32(ImPlotCol_PlotBorder));
     ImGui::PopClipRect();
+    if (geo_scale) GeoEnd(bb_frame, 1);
 }
 
 bool ColormapSlider(const char* label, float* t, ImVec4* out, const char* format, ImPlotColormap cmap) {

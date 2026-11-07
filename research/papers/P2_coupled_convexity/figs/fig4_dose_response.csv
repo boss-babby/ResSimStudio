@@ -1,0 +1,19 @@
+geometry,fluid,ramp_w,m1,violations,M,status,source
+G1,CO2,0.05,2.92,9,40,confirmatory,H10e NS
+G1,water,0.05,4.53,19,40,confirmatory,H10e WNS
+G1,CO2,0.08,2.13,3,40,exploratory,H10f NSR08 s13
+G1,water,0.08,2.92,12,40,exploratory,H10f WNSR08 s13
+G1,CO2,0.08,2.13,5,40,exploratory,E12a NSR08 s29
+G1,water,0.08,2.92,14,40,exploratory,E12a WNSR08 s29
+G1,CO2,0.15,1.58,1,40,exploratory,H10f NSR15
+G1,water,0.15,1.93,0,40,exploratory,H10f WNSR15
+G1,CO2,0.5,1.17,0,40,confirmatory,H10f-a NSR
+G1,water,0.5,1.26,0,40,confirmatory,H10f-a WNSR
+G2,CO2,0.27425,1.31,0,40,confirmatory,H10g LOW
+G2,CO2,0.03761,3.6,21,40,confirmatory,H10g HIGH
+G2,water,0.27425,1.35,0,40,confirmatory,H10g LOW
+G2,water,0.04438,3.61,16,40,confirmatory,H10g HIGH
+G2,CO2,0.08606,2.02,6,40,exploratory,E12b s29
+G2,CO2,0.05689,2.6,13,40,exploratory,E12b s29
+G2,water,0.10155,2.01,1,40,exploratory,E12b s29
+G2,water,0.06713,2.61,11,40,exploratory,E12b s29

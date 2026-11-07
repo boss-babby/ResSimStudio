@@ -1,4 +1,5 @@
 // ResSim Studio - entry point: Win32 window, D3D11 swap chain, Direct2D/DirectWrite interop, Dear ImGui.
+#include "i18n.h"
 #include "gfx.h"
 #include "app.h"
 #include "theme.h"
@@ -6,10 +7,15 @@
 #include "implot.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
+#include "gpu_compute.h"
 #include <shellapi.h>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <fstream>
 #include <objbase.h>
-#include "gpu_solver.h"
 #include <string>
+#include <cctype>
 
 Gfx g_gfx;
 static UINT g_resizeW = 0, g_resizeH = 0;
@@ -108,10 +114,25 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmdLine, int) {
+    // C18 headless linear-solver benchmark:  ResSimStudio.exe --gpu-bench [maxCells] [report.txt]
+    if (cmdLine && std::strstr(cmdLine, "--gpu-bench")) {
+        int maxCells = 1000000; std::string file = "gpu_benchmark.txt";
+        const char* a = std::strstr(cmdLine, "--gpu-bench") + 11;
+        while (*a == ' ') ++a;
+        if (*a >= '0' && *a <= '9') { maxCells = std::atoi(a); while (*a && *a != ' ') ++a; while (*a == ' ') ++a; }
+        if (*a) { file = a; while (!file.empty() && (file.back() == ' ' || file.back() == '"')) file.pop_back(); if (!file.empty() && file[0] == '"') file.erase(0, 1); }
+        const bool con = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        if (con) { FILE* fo = nullptr; freopen_s(&fo, "CONOUT$", "w", stdout); }
+        const std::string r = gpu::benchmark(maxCells, 0);
+        bool ok = false;
+        const std::string st = gpu::selfTest(ok);
+        std::ofstream(file) << r << "self test: " << (ok ? "PASS " : "FAIL ") << st << "\n";
+        if (con) { std::printf("%s\nself test: %s %s\nreport written to %s\n", r.c_str(), ok ? "PASS" : "FAIL", st.c_str(), file.c_str()); std::fflush(stdout); }
+        return ok ? 0 : 2;
+    }
     // the common file dialogs (shell namespace) expect a single-threaded COM apartment on the UI thread
     const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     ImGui_ImplWin32_EnableDpiAwareness();
-    registerGpuSolver();
     WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInst, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
                       L"ResSimStudio", nullptr};
     wc.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(1));
@@ -141,6 +162,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmdLine, int) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
+    GImPlotTranslate = &i18n::trs;   // C48: plot axis labels, legends and titles follow the interface language
+    GImGuiTitleTranslate = &i18n::trs;   // C49: window titles and dock tabs (display only; IDs and the saved layout unchanged)
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
@@ -152,8 +175,33 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmdLine, int) {
     App app;
     g_app = &app;
     app.init();
-    if (cmdLine && *cmdLine) {
-        std::string p(cmdLine);
+    // C32 ResGeo: 'ResSimStudio.exe --geo' (ResGeo.exe launcher) or an executable named ResGeo*.exe
+    std::string cmd = cmdLine ? cmdLine : "";
+    {
+        char exe[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        std::string en(exe);
+        const size_t sl = en.find_last_of("\\/");
+        if (sl != std::string::npos) en = en.substr(sl + 1);
+        for (char& ch : en) ch = char(std::tolower((unsigned char)ch));
+        const size_t lg = cmd.find("--lang ");   // C43: --lang <code> = interface language for this session
+        if (lg != std::string::npos) {
+            size_t a = lg + 7; while (a < cmd.size() && cmd[a] == ' ') ++a;
+            size_t b = a; while (b < cmd.size() && cmd[b] != ' ') ++b;
+            i18n::setLanguage(cmd.substr(a, b - a));
+            cmd.erase(lg, b - lg);
+        }
+        const size_t g = cmd.find("--geo");
+        if (g != std::string::npos || en.rfind("resgeo", 0) == 0) {
+            if (g != std::string::npos) cmd.erase(g, 5);
+            while (!cmd.empty() && cmd.front() == ' ') cmd.erase(0, 1);
+            while (!cmd.empty() && cmd.back() == ' ') cmd.pop_back();
+            app.setGeoMode(true);
+            SetWindowTextW(hwnd, L"ResGeo - geomodelling (ResSim Studio)");
+        }
+    }
+    if (!cmd.empty()) {
+        std::string p(cmd);
         if (p.size() > 1 && p.front() == '"') p = p.substr(1, p.find('"', 1) - 1);
         app.openFile(p);
     }

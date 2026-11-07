@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -493,126 +492,33 @@ bool readSummary(const std::string& smspec, Summary& s, std::string* err) {
     return true;
 }
 
-// ---------------------------------------------------------------- binary writer
-namespace {
-
-struct BinWriter {
-    std::ofstream f;
-    explicit BinWriter(const std::string& p) : f(p, std::ios::binary) {}
-
-    void u32(uint32_t v) {
-        const unsigned char b[4] = {uint8_t(v >> 24), uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v)};
-        f.write(reinterpret_cast<const char*>(b), 4);
-    }
-    void header(const std::string& name, int count, const char* type) {
-        char h[16];
-        std::memset(h, ' ', 16);
-        std::memcpy(h, name.data(), std::min<size_t>(8, name.size()));
-        const uint32_t c = uint32_t(count);
-        h[8] = char(c >> 24); h[9] = char(c >> 16); h[10] = char(c >> 8); h[11] = char(c);
-        std::memcpy(h + 12, type, 4);
-        u32(16); f.write(h, 16); u32(16);
-    }
-    void ints(const std::string& name, const std::vector<int>& v) {
-        header(name, int(v.size()), "INTE");
-        for (size_t s0 = 0; s0 < v.size(); s0 += 1000) {
-            const size_t n = std::min<size_t>(1000, v.size() - s0);
-            u32(uint32_t(4 * n));
-            for (size_t i = 0; i < n; ++i) u32(uint32_t(v[s0 + i]));
-            u32(uint32_t(4 * n));
+std::vector<std::string> componentNames(const Case& c) {
+    std::vector<std::string> out;
+    auto up = [](std::string s) { for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch))); return s; };
+    for (const ExtraKeyword& k : c.extraKeywords) {
+        if (k.name != "TRACER") continue;
+        for (const auto& r : verbatimRecords(k.body)) {
+            if (r.size() < 2 || r[0].empty()) continue;
+            const std::string n = up(r[0]);
+            if (std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
         }
     }
-    void reals(const std::string& name, const std::vector<float>& v) {
-        header(name, int(v.size()), "REAL");
-        for (size_t s0 = 0; s0 < v.size(); s0 += 1000) {
-            const size_t n = std::min<size_t>(1000, v.size() - s0);
-            u32(uint32_t(4 * n));
-            for (size_t i = 0; i < n; ++i) {
-                uint32_t u; std::memcpy(&u, &v[s0 + i], 4);
-                u32(u);
-            }
-            u32(uint32_t(4 * n));
-        }
+    if (c.salt.on && std::find(out.begin(), out.end(), "NACL") == out.end()) out.push_back("NACL");
+    bool surf = false, alk = false, foam = false;
+    for (const ExtraKeyword& k : c.extraKeywords) {
+        if (k.section != DeckSection::Runspec) continue;
+        if (k.name == "SURFACT" || k.name == "SURFACTW") surf = true;
+        if (k.name == "ALKALINE") alk = true;
+        if (k.name == "FOAM") foam = true;
     }
-    void chars(const std::string& name, const std::vector<std::string>& v) {
-        header(name, int(v.size()), "CHAR");
-        for (size_t s0 = 0; s0 < v.size(); s0 += 105) {
-            const size_t n = std::min<size_t>(105, v.size() - s0);
-            u32(uint32_t(8 * n));
-            for (size_t i = 0; i < n; ++i) {
-                char c[8]; std::memset(c, ' ', 8);
-                std::memcpy(c, v[s0 + i].data(), std::min<size_t>(8, v[s0 + i].size()));
-                f.write(c, 8);
-            }
-            u32(uint32_t(8 * n));
-        }
-    }
-};
-
-} // namespace
-
-bool writeSummary(const Summary& s, const std::string& base, std::string* err) {
-    const size_t nt = s.time.size();
-    std::vector<size_t> order; // TIME first
-    int tv = -1;
-    for (size_t i = 0; i < s.vars.size(); ++i)
-        if (s.vars[i].keyword == "TIME") { tv = int(i); break; }
-    if (tv >= 0) order.push_back(size_t(tv));
-    for (size_t i = 0; i < s.vars.size(); ++i)
-        if (int(i) != tv) order.push_back(i);
-    const size_t nv = order.size() + (tv < 0 ? 1 : 0);
-
-    {
-        BinWriter w(base + ".SMSPEC");
-        if (!w.f) { if (err) *err = "cannot write " + base + ".SMSPEC"; return false; }
-        const int unitId = s.unitSystem == "METRIC" ? 1 : s.unitSystem == "LAB" ? 3 : 2;
-        w.ints("INTEHEAD", {unitId, 100});
-        w.chars("RESTART", std::vector<std::string>(9, ""));
-        w.ints("DIMENS", {int(nv), s.nx, s.ny, s.nz, 0, -1});
-        std::vector<std::string> kw, wg, un;
-        std::vector<int> nums;
-        if (tv < 0) { kw.push_back("TIME"); wg.push_back(":+:+:+:+"); un.push_back("DAYS"); nums.push_back(0); }
-        for (size_t i : order) {
-            const SummaryVar& v = s.vars[i];
-            kw.push_back(v.keyword);
-            wg.push_back(v.wgname.empty() ? ":+:+:+:+" : v.wgname);
-            un.push_back(v.unit);
-            nums.push_back(v.num);
-        }
-        w.chars("KEYWORDS", kw);
-        w.chars("WGNAMES", wg);
-        w.ints("NUMS", nums);
-        w.chars("UNITS", un);
-        w.ints("STARTDAT", {s.startDay, s.startMonth, s.startYear, 0, 0, 0});
-        if (!w.f) { if (err) *err = "write error " + base + ".SMSPEC"; return false; }
-    }
-
-    BinWriter w(base + ".UNSMRY");
-    if (!w.f) { if (err) *err = "cannot write " + base + ".UNSMRY"; return false; }
-    size_t rep = 0;
-    bool newReport = true;
-    std::vector<float> row(nv);
-    for (size_t t = 0; t < nt; ++t) {
-        if (newReport) {
-            w.ints("SEQHDR", {int(rep)});
-            newReport = false;
-        }
-        w.ints("MINISTEP", {int(t)});
-        size_t k = 0;
-        if (tv < 0) row[k++] = float(s.time[t]);
-        for (size_t i : order)
-            row[k++] = t < s.values[i].size() ? s.values[i][t] : 0.0f;
-        w.reals("PARAMS", row);
-        while (rep < s.reportIndex.size() && s.reportIndex[rep] <= int(t)) {
-            ++rep;
-            newReport = true;
-        }
-    }
-    if (!w.f) { if (err) *err = "write error " + base + ".UNSMRY"; return false; }
-    return true;
+    if (alk) out.push_back("ALKALINE");
+    if (surf) out.push_back("SURFACT");
+    if (foam) out.push_back("FOAM");
+    return out;
 }
 
-Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<std::string>& wellNames, UnitSystem units) {
+Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<std::string>& wellNames, UnitSystem units,
+                       const std::vector<std::string>& compNames) {
     Summary s;
     const bool field = units == UnitSystem::Field;
     s.unitSystem = field ? "FIELD" : "METRIC";
@@ -652,6 +558,61 @@ Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<s
         {"NEWTON", "", "", [](const SummaryPoint& p) { return double(p.newton); }},
         {"NLINEARS", "", "", [](const SummaryPoint& p) { return double(p.linear); }},
     };
+    // C35 SOLVENT vectors (only for solvent runs)
+    bool solvAny = false;
+    for (const SummaryPoint& p : pts) if (p.fnir > 0 || p.fnpr > 0 || p.fnip > 0 || p.fnit > 0) { solvAny = true; break; }
+    if (solvAny) {
+        defs.push_back({"FNIR", "", gasR, [](const SummaryPoint& p) { return p.fnir; }});
+        defs.push_back({"FNPR", "", gasR, [](const SummaryPoint& p) { return p.fnpr; }});
+        defs.push_back({"FNIT", "", gasT, [](const SummaryPoint& p) { return p.fnit; }});
+        defs.push_back({"FNPT", "", gasT, [](const SummaryPoint& p) { return p.fnpt; }});
+        defs.push_back({"FNIP", "", gasT, [](const SummaryPoint& p) { return p.fnip; }});
+    }
+    // C35 gas lift vectors (only for runs with lift gas)
+    bool liftAny = false;
+    for (const SummaryPoint& p : pts) if (p.fglir > 0 || p.fglit > 0) { liftAny = true; break; }
+    if (liftAny) {
+        defs.push_back({"FGLIR", "", gasR, [](const SummaryPoint& p) { return p.fglir; }});
+        defs.push_back({"FGLIT", "", gasT, [](const SummaryPoint& p) { return p.fglit; }});
+    }
+    // C35 gas consumption / import / sales (GCONSUMP; only when used)
+    bool consAny = false;
+    for (const SummaryPoint& p : pts) if (p.fgct > 0 || p.fgimt > 0) { consAny = true; break; }
+    if (consAny) {
+        defs.push_back({"FGCR", "", gasR, [](const SummaryPoint& p) { return p.fgcr; }});
+        defs.push_back({"FGCT", "", gasT, [](const SummaryPoint& p) { return p.fgct; }});
+        defs.push_back({"FGIMR", "", gasR, [](const SummaryPoint& p) { return p.fgimr; }});
+        defs.push_back({"FGIMT", "", gasT, [](const SummaryPoint& p) { return p.fgimt; }});
+        defs.push_back({"FGSR", "", gasR, [](const SummaryPoint& p) { return p.fgsr; }});
+        defs.push_back({"FGST", "", gasT, [](const SummaryPoint& p) { return p.fgst; }});
+    }
+    // C27 / C35 component vectors (tracers, chemicals): amount / day and cumulative amounts
+    size_t ncomp = 0;
+    for (const SummaryPoint& p : pts) ncomp = std::max(ncomp, p.fcompP.size());
+    auto short3 = [](const std::string& n) { return n == "SURFACT" ? std::string("SUR") : n == "ALKALINE" ? std::string("ALK") : n == "FOAM" ? std::string("FOA") : n; };
+    const bool blackOilComps = !compNames.empty();
+    for (size_t i = 0; blackOilComps && i < ncomp; ++i) {
+        const std::string n = i < compNames.size() ? short3(compNames[i]) : "C" + std::to_string(i + 1);
+        const bool chem = i < compNames.size() && (compNames[i] == "SURFACT" || compNames[i] == "ALKALINE" || compNames[i] == "FOAM");
+        const char* uR = chem ? (field ? "LB/DAY" : "KG/DAY") : "";
+        const char* uT = chem ? (field ? "LB" : "KG") : "";
+        auto at = [i](const std::vector<double>& v) { return i < v.size() ? v[i] : 0.0; };
+        defs.push_back({("FTPR" + n).substr(0, 8), "", uR, [at](const SummaryPoint& p) { return at(p.fcompP) * 86400.0; }});
+        defs.push_back({("FTPT" + n).substr(0, 8), "", uT, [at](const SummaryPoint& p) { return at(p.fcompPT); }});
+        defs.push_back({("FTIR" + n).substr(0, 8), "", uR, [at](const SummaryPoint& p) { return at(p.fcompI) * 86400.0; }});
+        defs.push_back({("FTIT" + n).substr(0, 8), "", uT, [at](const SummaryPoint& p) { return at(p.fcompIT); }});
+        if (i < compNames.size() && compNames[i] == "SURFACT") {
+            defs.push_back({"FSPR", "", uR, [at](const SummaryPoint& p) { return at(p.fcompP) * 86400.0; }});
+            defs.push_back({"FSPT", "", uT, [at](const SummaryPoint& p) { return at(p.fcompPT); }});
+            defs.push_back({"FSIR", "", uR, [at](const SummaryPoint& p) { return at(p.fcompI) * 86400.0; }});
+            defs.push_back({"FSIT", "", uT, [at](const SummaryPoint& p) { return at(p.fcompIT); }});
+        }
+        for (size_t w = 0; w < wellNames.size(); ++w) {
+            auto wc = [w, i](const SummaryPoint& p) { return w < p.wells.size() && i < p.wells[w].comp.size() ? p.wells[w].comp[i] * 86400.0 : 0.0; };
+            defs.push_back({("WTPR" + n).substr(0, 8), wellNames[w], uR, [wc](const SummaryPoint& p) { return std::max(0.0, wc(p)); }});
+            defs.push_back({("WTIR" + n).substr(0, 8), wellNames[w], uR, [wc](const SummaryPoint& p) { return std::max(0.0, -wc(p)); }});
+        }
+    }
     for (size_t w = 0; w < wellNames.size(); ++w) {
         auto W = [w](const SummaryPoint& p) -> const WellRates* { return w < p.wells.size() ? &p.wells[w] : nullptr; };
         const std::string& nm = wellNames[w];
@@ -661,11 +622,53 @@ Summary summaryFromRun(const std::vector<SummaryPoint>& pts, const std::vector<s
         defs.push_back({"WLPR", nm, liqR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->oil + r->water : 0.0; }});
         defs.push_back({"WWIR", nm, liqR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->waterInj : 0.0; }});
         defs.push_back({"WGIR", nm, gasR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->gasInj : 0.0; }});
-        defs.push_back({"WBHP", nm, pr, [W](const SummaryPoint& p) { auto r = W(p); return r && r->open ? r->bhp : 0.0; }});
+        defs.push_back({"WBHP", nm, pr, [W](const SummaryPoint& p) { auto r = W(p); return r && (r->open || r->stopped) ? r->bhp : 0.0; }});
         defs.push_back({"WWCT", nm, "", [W](const SummaryPoint& p) { auto r = W(p); return r && r->oil + r->water > 0 ? r->water / (r->oil + r->water) : 0.0; }});
         defs.push_back({"WCIR", nm, field ? "LB/DAY" : "KG/DAY", [W](const SummaryPoint& p) { auto r = W(p); return r ? r->polyInj : 0.0; }});
         defs.push_back({"WCPR", nm, field ? "LB/DAY" : "KG/DAY", [W](const SummaryPoint& p) { auto r = W(p); return r ? r->polyProd : 0.0; }});
         defs.push_back({"WGOR", nm, gor, [W](const SummaryPoint& p) { auto r = W(p); return r && r->oil > 0 ? r->gas / r->oil : 0.0; }});
+        {   // C46 productivity / injectivity indices (OPM: surface volume per day per pressure unit)
+            const char* piU = field ? "STB/D/PSI" : "SM3/DAY/BARS";
+            const char* piG = field ? "MSCF/D/PSI" : "SM3/DAY/BARS";
+            defs.push_back({"WPIO", nm, piU, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->pi[0] : 0.0; }});
+            defs.push_back({"WPIW", nm, piU, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->pi[1] : 0.0; }});
+            defs.push_back({"WPIG", nm, piG, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->pi[2] : 0.0; }});
+            defs.push_back({"WPIL", nm, piU, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->pi[0] + r->pi[1] : 0.0; }});
+            defs.push_back({"WPI", nm, piU, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->piPref : 0.0; }});
+        }
+        for (int e = 0; e < 8; ++e)   // C43 well performance events of the step (OPM WPWE0-7, dimensionless counts / flags)
+            defs.push_back({"WPWE" + std::to_string(e), nm, "", [W, e](const SummaryPoint& p) { auto r = W(p); return r ? double(r->pwe[e]) : 0.0; }});
+        // C33 well cumulatives (rate of the step x step length, like the field totals); evaluated in time order
+        auto cum = [W](double WellRates::*m) {
+            auto acc = std::make_shared<double>(0.0);
+            return [W, m, acc](const SummaryPoint& p) { auto r = W(p); if (r) *acc += r->eff * (r->*m) * p.dt; return *acc; };
+        };
+        defs.push_back({"WOPT", nm, liqT, cum(&WellRates::oil)});
+        defs.push_back({"WWPT", nm, liqT, cum(&WellRates::water)});
+        defs.push_back({"WGPT", nm, gasT, cum(&WellRates::gas)});
+        defs.push_back({"WWIT", nm, liqT, cum(&WellRates::waterInj)});
+        defs.push_back({"WGIT", nm, gasT, cum(&WellRates::gasInj)});
+        if (liftAny) {
+            defs.push_back({"WGLIR", nm, gasR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->lift : 0.0; }});
+            defs.push_back({"WGLIT", nm, gasT, cum(&WellRates::lift)});
+        }
+        if (solvAny) {
+            defs.push_back({"WNIR", nm, gasR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->solvInj : 0.0; }});
+            defs.push_back({"WNPR", nm, gasR, [W](const SummaryPoint& p) { auto r = W(p); return r ? r->solvProd : 0.0; }});
+            defs.push_back({"WNIT", nm, gasT, cum(&WellRates::solvInj)});
+            defs.push_back({"WNPT", nm, gasT, cum(&WellRates::solvProd)});
+        }
+    }
+    {   // C31 UDQ vectors (FU* scalars, WU* / GU* per well / group); undefined values are written as 0
+        std::vector<std::string> keys;
+        for (const auto& p : pts) for (const auto& u : p.udq) if (std::find(keys.begin(), keys.end(), u.first) == keys.end()) keys.push_back(u.first);
+        for (const auto& k : keys) {
+            const size_t c = k.find(':');
+            defs.push_back({k.substr(0, c), c == std::string::npos ? std::string() : k.substr(c + 1), "", [k](const SummaryPoint& p) {
+                for (const auto& u : p.udq) if (u.first == k) return std::isfinite(u.second) ? u.second : 0.0;
+                return 0.0;
+            }});
+        }
     }
     s.vars.resize(defs.size());
     s.values.assign(defs.size(), {});
@@ -773,17 +776,11 @@ bool Restart::open(const std::vector<std::string>& files, std::string* err) {
 
 std::vector<std::string> Restart::arrayNames(int step) const {
     std::vector<std::string> out;
-    if (step < 0 || step >= int(steps_.size())) return out;
-    const RestartStep& st = steps_[size_t(step)];
-    const auto& A = files_[size_t(st.file)]->arrays();
     bool sw = false, sg = false, so = false;
-    for (int i = st.first; i < st.last; ++i) {
-        const ArrayInfo& a = A[size_t(i)];
-        if (a.count != na_ || na_ == 0) continue;
-        if (a.type != Type::REAL && a.type != Type::DOUB && a.type != Type::INTE) continue;
-        if (std::find(out.begin(), out.end(), a.name) != out.end()) continue;
-        out.push_back(a.name);
-        sw |= a.name == "SWAT"; sg |= a.name == "SGAS"; so |= a.name == "SOIL";
+    for (const Entry& e : entries(step)) {
+        if (std::find(out.begin(), out.end(), e.name) != out.end()) continue;
+        out.push_back(e.name);
+        sw |= e.name == "SWAT"; sg |= e.name == "SGAS"; so |= e.name == "SOIL";
     }
     if (!so && (sw || sg)) out.push_back("SOIL");     // derived: 1 - Sw - Sg
     return out;
@@ -800,6 +797,14 @@ std::vector<float> Restart::load(int step, const std::string& name) const {
         return {};
     };
     v = get(name);
+    if (v.empty()) {   // generic names: repeated arrays (NAMEk) / k * na arrays split per component
+        for (const Entry& e : entries(step))
+            if (e.name == name) {
+                const std::vector<float> b = f.floats(e.array);
+                if (b.size() >= size_t(e.offset + na_)) v.assign(b.begin() + e.offset, b.begin() + e.offset + na_);
+                break;
+            }
+    }
     if (v.empty() && name == "SOIL") {
         const auto sw = get("SWAT"), sg = get("SGAS");
         if (sw.empty() && sg.empty()) return v;
@@ -807,6 +812,49 @@ std::vector<float> Restart::load(int step, const std::string& name) const {
         for (size_t i = 0; i < v.size(); ++i) v[i] -= (sw.empty() ? 0.0f : sw[i]) + (sg.empty() ? 0.0f : sg[i]);
     }
     return v;
+}
+
+std::vector<Restart::Entry> Restart::entries(int step) const {
+    std::vector<Entry> out;
+    if (step < 0 || step >= int(steps_.size()) || na_ <= 0) return out;
+    const RestartStep& st = steps_[size_t(step)];
+    const auto& A = files_[size_t(st.file)]->arrays();
+    std::vector<std::pair<std::string, int>> sel;
+    std::map<std::string, int> cnt;
+    for (int i = st.first; i < st.last; ++i) {
+        const ArrayInfo& a = A[size_t(i)];
+        if (a.count <= 0 || a.count % na_ != 0 || a.count / na_ > 64) continue;
+        if (a.type != Type::REAL && a.type != Type::DOUB && a.type != Type::INTE) continue;
+        std::string nm = a.name;
+        while (!nm.empty() && nm.back() == ' ') nm.pop_back();
+        if (nm.empty()) continue;
+        sel.push_back({nm, i}); cnt[nm]++;
+    }
+    std::map<std::string, int> seen;
+    for (const auto& s : sel) {
+        const int k = A[size_t(s.second)].count / na_;
+        if (k == 1) {
+            const int r = cnt[s.first] > 1 ? ++seen[s.first] : 0;
+            out.push_back({r ? s.first + std::to_string(r) : s.first, s.second, 0});
+        } else
+            for (int j = 0; j < k; ++j) out.push_back({s.first + std::to_string(j + 1), s.second, j * na_});
+    }
+    return out;
+}
+
+std::vector<std::pair<std::string, std::vector<float>>> Restart::cellArrays(int step, const std::vector<std::string>& skip) const {
+    std::vector<std::pair<std::string, std::vector<float>>> out;
+    const auto E = entries(step);
+    if (E.empty()) return out;
+    const File& f = *files_[size_t(steps_[size_t(step)].file)];
+    int cached = -1; std::vector<float> buf;
+    for (const Entry& e : E) {
+        if (std::find(skip.begin(), skip.end(), e.name) != skip.end()) continue;
+        if (e.array != cached) { buf = f.floats(e.array); cached = e.array; }
+        if (buf.size() < size_t(e.offset + na_)) continue;
+        out.push_back({e.name, std::vector<float>(buf.begin() + e.offset, buf.begin() + e.offset + na_)});
+    }
+    return out;
 }
 
 // ================================================================== case
@@ -907,7 +955,7 @@ bool openResultCase(const std::string& anyFile, ResultCase& rc, std::string* err
 }
 
 // ================================================================== comparison
-std::vector<Snapshot> snapshotsFromRestart(const ResultCase& rc, int maxSteps) {
+std::vector<Snapshot> snapshotsFromRestart(const ResultCase& rc, int maxSteps, size_t extraBudget) {
     std::vector<Snapshot> out;
     if (!rc.hasRestart) return out;
     const auto& st = rc.restart.steps();
@@ -930,6 +978,31 @@ std::vector<Snapshot> snapshotsFromRestart(const ResultCase& rc, int maxSteps) {
         sn.so.resize(na);
         for (size_t c = 0; c < na; ++c) sn.so[c] = std::max(0.f, 1.f - sn.sw[c] - sn.sg[c]);
         out.push_back(std::move(sn));
+    }
+    // all further restart arrays (E300: XMF / YMF / ZMF / AMF per component, SOIL, DENO / DENG, PSAT, ...; OPM CO2STORE:
+    // RSW, RVW, ...): kept generically in Snapshot::extra, within the memory budget
+    if (!out.empty() && na > 0) {
+        static const std::vector<std::string> core = {"PRESSURE", "SWAT", "SGAS", "RS", "RV", "POLYMER", "PADS"};
+        const auto probe = rc.restart.cellArrays(n - 1, core);
+        const size_t perStep = probe.size() * na;
+        const size_t ns = out.size();
+        size_t every = 1;
+        if (perStep > 0 && perStep * ns > extraBudget) every = (perStep * ns + extraBudget - 1) / std::max<size_t>(1, extraBudget) + 1;
+        if (perStep > 0 && perStep <= extraBudget) {
+            // map snapshots back to restart steps (steps with a wrong PRESSURE size were skipped above)
+            size_t si = 0;
+            for (int k = 0; k < n && si < ns; ++k) {
+                if (std::fabs(st[size_t(k)].days - out[si].time) > 1e-9) continue;
+                if (si % every == 0 || si + 1 == ns || si == 0) {
+                    auto arr = rc.restart.cellArrays(k, core);
+                    for (auto& a : arr) {
+                        if (a.first == "SOIL") { out[si].so = std::move(a.second); continue; }   // stored oil saturation
+                        out[si].extra.push_back(std::move(a));
+                    }
+                }
+                ++si;
+            }
+        }
     }
     return out;
 }

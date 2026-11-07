@@ -1,7 +1,13 @@
 // Built-in example library (see examples.h). All geology is generated procedurally with a portable RNG so that
 // every platform builds bit-identical cases.
+#include "ressim/gasdata.h"
 #include "ressim/examples.h"
+#include "ressim/geomech.h"
+#include "ressim/tools.h"
 #include "ressim/simulator.h"
+#include "ressim/steam.h"
+#include "ressim/io.h"
+#include "ressim/hydrofrac.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -663,7 +669,811 @@ Case exHistoryMatch() {
     return c;
 }
 
+
+// ---- local grid refinement: near-well LGRs (graded, layered) and a sub-grid high-permeability streak
+Case exLocalRefinement() {
+    Case c; c.title = "Advanced: near-well local grid refinement (21x21x4 + 3 LGRs)";
+    c.units = UnitSystem::Field;
+    boxGrid(c, 21, 21, 4, 60, 60, {15, 10, 20, 15}, 6000);
+    setLayerProps(c, {250, 40, 400, 120}, {0.22, 0.16, 0.24, 0.2}, 0.1);
+    deadOilFluids(c, 2.0, false);
+    coreySWOF(c.props.swof, 0.2, 0.25, 2.0, 2.0, 0.4, 1.0, 20);
+    c.equil.datumDepth = 6030; c.equil.datumPressure = 3200; c.equil.owc = 7000; c.equil.goc = 0;
+    c.wells = {well("INJ", WellType::WaterInjector, 2, 2, 0, 3), well("PROD", WellType::Producer, 18, 18, 0, 3)};
+    GridInput& g = c.grid;
+    auto graded = [](int hosts, int per, int wellHost) {   // HXFIN: geometric widths, smallest next to the well
+        std::vector<double> w;
+        for (int h = 0; h < hosts; ++h)
+            for (int m = 0; m < per; ++m) {
+                const double d = std::abs((h * per + m) - (wellHost * per + 0.5 * (per - 1)));
+                w.push_back(std::pow(1.5, d));
+            }
+        return w;
+    };
+    // producer: 3 x 3 host columns, 5 x 5 children each, graded towards the well, every layer split in two
+    LgrInput P; P.name = "LPROD"; P.i1 = 17; P.i2 = 19; P.j1 = 17; P.j2 = 19; P.k1 = 0; P.k2 = 3;
+    P.nx = 15; P.ny = 15; P.nz = 8; P.hxfin = graded(3, 5, 1); P.hyfin = P.hxfin;
+    g.lgrs.push_back(P);
+    // injector: 3 x 3 x 1 refinement of its column neighbourhood
+    LgrInput I; I.name = "LINJ"; I.i1 = 1; I.i2 = 3; I.j1 = 1; I.j2 = 3; I.k1 = 0; I.k2 = 3; I.nx = 9; I.ny = 9; I.nz = 4;
+    g.lgrs.push_back(I);
+    // a 20 ft wide, 10 ft thick channel inside layer 3 between the wells - thinner than one host cell
+    LgrInput S; S.name = "STREAK"; S.i1 = 6; S.i2 = 14; S.j1 = 10; S.j2 = 10; S.k1 = 2; S.k2 = 2; S.nx = 9; S.ny = 3; S.nz = 2;
+    std::vector<double> kx(size_t(S.size()), NAN);
+    for (int i = 0; i < S.nx; ++i) kx[size_t(S.index(i, 1, 1))] = 3000;
+    S.props["PERMX"] = kx; S.props["PERMY"] = kx;
+    g.lgrs.push_back(S);
+    moveWellToLgr(c, 0, 1);
+    moveWellToLgr(c, 1, 0);
+    steps(c, 40, 45.65625);
+    at(c, 0, injCtl("INJ", 1000, 6000));
+    at(c, 0, prodCtl("PROD", Control::LRAT, 1000, 1500));
+    return c;
+}
+
 struct Entry { ExampleInfo info; Case (*make)(); };
+
+// ---- compositional / CO2 storage ------------------------------------------------------------------------------------
+// Dedicated CO2STORE model: CO2 injection into a dipping saline aquifer (2-D section), 10 years injection + 40 years
+// post-injection. Plume migration up-dip under the seal, dissolution and residual (krg = 0) trapping.
+Case exCo2Storage() {
+    Case c; c.title = "Advanced: CO2 storage in a dipping saline aquifer (CO2STORE, 40x1x20)";
+    c.units = UnitSystem::Metric;
+    const int nx = 40, nz = 20;
+    boxGrid(c, nx, 1, nz, 50, 1000, std::vector<double>(nz, 5.0), 1200);
+    GridInput& g = c.grid;
+    const double dip = std::tan(2.0 * M_PI / 180.0);
+    for (int i = 0; i < nx; ++i) g.tops[size_t(i)] = 1270.0 - dip * 50.0 * (i + 0.5);   // rises towards the closed up-dip end
+    std::vector<double> kL(nz, 400.0), pL(nz, 0.24);
+    for (int k = 0; k < nz; ++k) { kL[size_t(k)] = 250.0 + 350.0 * (0.5 + 0.5 * std::sin(1.7 * k)); pL[size_t(k)] = 0.20 + 0.06 * (0.5 + 0.5 * std::sin(1.7 * k)); }
+    setLayerProps(c, kL, pL, 0.1);
+    g.multpv.assign(size_t(g.size()), 1.0);
+    for (int k = 0; k < nz; ++k) g.multpv[size_t(g.index(0, 0, k))] = 2000.0;   // open down-dip boundary (large aquifer volume)
+    c.phases = Phases{true, false, true, false};
+    PropsInput& p = c.props;
+    p.rock = {150.0, 4.5e-5};
+    coreySWOF(p.swof, 0.2, 0.0, 3.0, 2.0, 1.0, 0.0, 20);   // brine: Corey 3 from Swc = 0.2
+    coreySGOF(p.sgof, 0.2, 0.05, 0.0, 2.0, 2.0, 0.7, 20);  // CO2: Corey 2, critical Sg 0.05 (residual trapping)
+    for (auto& r : p.swof) r.kro = 0;
+    for (auto& r : p.sgof) r.kro = 0;
+    c.comp.enabled = true; c.comp.co2store = true; c.comp.structured = true;
+    c.comp.fluid = co2StoreFluid(273.15 + 55.0, 1.0);
+    c.equil.datumDepth = 1300; c.equil.datumPressure = 130; c.equil.owc = 900; c.equil.goc = 900;   // all brine (contact above the top)
+    WellInput inj = well("CO2INJ", WellType::GasInjector, 4, 0, 14, 19, 0.2);
+    c.wells = {inj};
+    for (int y = 0; y < 10; ++y) { ReportStep r; r.length = 365.25; c.schedule.push_back(r); }
+    for (int y = 0; y < 8; ++y) { ReportStep r; r.length = 5 * 365.25; c.schedule.push_back(r); }
+    at(c, 0, injCtl("CO2INJ", 160000, 260));   // ~300 t/d of CO2
+    WellControl stop = injCtl("CO2INJ", 0, 260); stop.status = WellStatus::Shut;
+    at(c, 10, stop);
+    c.startYear = 2030;
+    return c;
+}
+
+// CO2 storage with every trapping mechanism and their interactions: caprock seal (structural), Land hysteresis
+// (residual), dissolution + diffusion (solubility), salt precipitation (dry-out) and kinetic carbonation (mineral).
+Case exCo2Trapping() {
+    Case c = exCo2Storage();
+    c.title = "Advanced: CO2 trapping mechanisms - structural, residual, solubility, mineral, salt (CO2STORE)";
+    GridInput& g = c.grid;
+    const int nx = g.nx, nz = g.nz;
+    for (int i = 0; i < nx; ++i)
+        for (int k = 0; k < 2; ++k) {   // two-layer caprock: tight, low porosity
+            const size_t q = size_t(g.index(i, 0, k));
+            g.permx[q] = 0.01; if (!g.permy.empty()) g.permy[q] = 0.01; if (!g.permz.empty()) g.permz[q] = 0.001; g.poro[q] = 0.08;
+        }
+    (void)nz;
+    c.props.hyst.on = true; c.props.hyst.model = 0;                  // Carlson scanning curves
+    c.comp.fluid.salinity = 2.0;                                      // ~105 000 ppm NaCl
+    co2::TrappingOptions& T = c.comp.trap;
+    T.sgtMax = 0.25;                                                  // Land: Sgt,max = 0.25
+    T.diffusion = true;
+    T.saltPrecip = true;
+    co2::MineralReaction m = co2::mineralPresets().front(); m.area = 20.0;
+    T.minerals = {m};
+    c.wells[0].completions[0].k1 = 12;                                // perforate the lower part only (below the seal)
+    return c;
+}
+
+// Compositional EOS model: SPE5 six-component fluid, gas injection (lean gas stream) into an undersaturated oil.
+Case exCompositional() {
+    Case c; c.title = "Advanced: Compositional lean-gas injection (SPE5 fluid, PR EOS, 7x7x3)";
+    c.units = UnitSystem::Field;
+    boxGrid(c, 7, 7, 3, 500, 500, {20, 30, 50}, 8325);
+    setLayerProps(c, {500, 50, 200}, {0.3, 0.3, 0.3}, 0.1);
+    spe1Fluids(c, false);
+    c.phases = Phases{true, true, true, false};
+    sandstoneScal(c, 0.2);
+    c.props.rock = {4000.0, 5e-6};
+    c.comp.enabled = true; c.comp.structured = true;
+    c.comp.fluid = spe5CompFluid();
+    c.comp.streams = {{"LEANGAS", {0.77, 0.20, 0.03, 0.0, 0.0, 0.0}}};
+    // E300 FIELDSEP semantics: the last stage is the stock tank -> explicit 2-stage train (separator + stock tank)
+    c.comp.separator = {{eos::fahrenheitToK(80), eos::psiaToPa(315)}, {eos::fahrenheitToK(60), eos::psiaToPa(14.696)}};
+    c.equil.datumDepth = 8400; c.equil.datumPressure = 4000; c.equil.owc = 8500; c.equil.goc = 7000;
+    WellInput p = well("PROD", WellType::Producer, 6, 6, 2, 2); p.refDepth = 8400;
+    WellInput i = well("INJ", WellType::GasInjector, 0, 0, 0, 0); i.refDepth = 8335;
+    c.wells = {p, i};
+    steps(c, 40, 91.3125);
+    at(c, 0, prodCtl("PROD", Control::ORAT, 3000, 1000));
+    at(c, 4, injCtl("INJ", 8000, 4500));
+    c.schedule[4].injStreams.push_back({"INJ", "LEANGAS"});
+    return c;
+}
+
+
+// ------------------------------------------------------------------ E300 THERMAL examples (milestone C7)
+// Heavy-oil thermal fluid (METRIC): HEAVY (non-volatile) + LIGHT (distillable fraction, Crookston K-values of a C10-like
+// pseudo-component), OILVISCT, IAPWS-IF97 water / steam, rock heat capacity / conductivity, heat loss to the over- and
+// underburden.
+void thermalHeavyOil(Case& c, double tInit) {
+    spe1Fluids(c, true);                                  // placeholders (the thermal fluid replaces the PVT tables)
+    c.phases = Phases{true, true, true, false};
+    ThermalInput& T = c.thermal;
+    T = ThermalInput(); T.enabled = true; T.structured = true;
+    ThermalComponent h; h.name = "HEAVY"; h.mw = 550; h.tcrit = 1e5; h.pcrit = 1; h.dead = true;
+    h.dref = 995; h.cref = 7e-5; h.thermex1 = 6.5e-4; h.specha = 2.1; h.zfactor = 0.96;
+    ThermalComponent l; l.name = "LIGHT"; l.mw = 180; l.tcrit = 650; l.pcrit = 18; l.dead = false;
+    l.kvcr[0] = 0; l.kvcr[1] = 83740; l.kvcr[2] = 0; l.kvcr[3] = 5537; l.kvcr[4] = 0;
+    l.dref = 820; l.cref = 1e-4; l.thermex1 = 9e-4; l.specha = 2.2; l.heatvap = 290; l.heatvape = 0.38; l.zfactor = 0.96;
+    T.comps = {h, l};
+    T.oilViscT = {{10, 8000, 8}, {40, 1500, 4}, {80, 200, 2}, {120, 45, 1.2}, {160, 15, 0.8}, {200, 6, 0.6}, {250, 3, 0.45}, {300, 1.6, 0.35}};
+    T.gasViscT = {{10, 0.008, 0.008}, {300, 0.016, 0.016}};
+    T.stdT = 15.56; T.stdP = 1.01325;
+    T.heatcr = {2347}; T.thconr = {150}; T.thconsf = {0};
+    T.heatLoss = true; T.obCv = 2347; T.obK = 150;
+    T.zi = {0.75, 0.25};
+    T.tempi = {tInit};
+    c.props.rock = {20.0, 5e-5};
+}
+// enumerated initial state of a box model: hydrostatic pressure (water gradient) from (datum depth, pressure), uniform Sw
+// (above connate, so that the water is mobile: a cold heavy-oil reservoir at Swc has almost no injectivity)
+void thermalEnumInit(Case& c, double datum, double pDatum, double sw) {
+    const GridInput& g = c.grid;
+    const int nxy = g.nx * g.ny, n = g.size();
+    InitialState& I = c.init;
+    I.pressure.assign(size_t(n), pDatum); I.swat.assign(size_t(n), sw); I.sgas.assign(size_t(n), 0.0);
+    for (int q = 0; q < nxy; ++q) {
+        double d = g.tops[size_t(q)];
+        for (int k = 0; k < g.nz; ++k) {
+            const double dz = g.dz[size_t(k) * nxy + q], mid = d + 0.5 * dz;
+            I.pressure[size_t(k) * nxy + q] = pDatum + 1000.0 * 9.80665 * (mid - datum) / 1e5;
+            d += dz;
+        }
+    }
+}
+void winjtemp(Case& c, int step, const std::string& well, double quality, double tC) {
+    ThermalWinj w; w.well = well; w.step = step; w.quality = quality; w.temp = tC;
+    w.pres = steam::psat(tC + 273.15) / 1e5;             // saturated: pressure explicit (ECLIPSE gets the same state)
+    c.thermal.winj.push_back(w);
+}
+
+// Steamflood: quarter of an inverted five-spot, 80 % quality steam at 240 C into the lower two layers
+Case exSteamflood() {
+    Case c; c.title = "Thermal: Steamflood of a heavy-oil reservoir (quarter five-spot, E300 THERMAL)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 9, 9, 3, 8, 8, {4, 4, 4}, 300);
+    setLayerProps(c, {3000, 3000, 3000}, {0.33, 0.33, 0.33}, 0.5);
+    sandstoneScal(c, 0.15);
+    thermalHeavyOil(c, 25);
+    c.equil.datumDepth = 300; c.equil.datumPressure = 15; c.equil.owc = 400; c.equil.goc = 200;
+    WellInput p = well("PROD", WellType::Producer, 8, 8, 0, 2, 0.18); p.refDepth = 300;
+    WellInput i = well("INJ", WellType::WaterInjector, 0, 0, 1, 2, 0.18); i.refDepth = 304;
+    c.wells = {p, i};
+    steps(c, 20, 91.3125);                                // 5 years, quarterly reports
+    at(c, 0, prodCtl("PROD", Control::BHP, 5, 5));
+    at(c, 0, injCtl("INJ", 60, 40));
+    winjtemp(c, 0, "INJ", 0.8, 240);
+    return c;
+}
+
+// Cyclic steam stimulation: one vertical well (injector and producer completed in the same column) - 3 cycles of
+// 30 days steam, 10 days soak and 325 days production; 174 x 174 m drainage area refined to 2 m at the well, mobile
+// initial water (Sw 0.25)
+Case exCss() {
+    Case c; c.title = "Thermal: Cyclic steam stimulation (huff and puff), 3 cycles (E300 THERMAL)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 11, 11, 4, 20, 20, {3, 3, 3, 3}, 350);
+    {   // geometric refinement towards the well column (5, 5): 2 m near-well cells, 40 m at the boundary (174 m x 174 m)
+        const double w[11] = {40, 25, 12, 6, 3, 2, 3, 6, 12, 25, 40};
+        GridInput& g = c.grid;
+        for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i) {
+            const size_t q = size_t(k) * g.nx * g.ny + size_t(j) * g.nx + size_t(i);
+            g.dx[q] = w[i]; g.dy[q] = w[j];
+        }
+    }
+    setLayerProps(c, {2500, 2500, 2500, 2500}, {0.32, 0.32, 0.32, 0.32}, 0.5);
+    sandstoneScal(c, 0.15);
+    thermalHeavyOil(c, 20);
+    c.equil.datumDepth = 350; c.equil.datumPressure = 30; c.equil.owc = 450; c.equil.goc = 250;
+    thermalEnumInit(c, 350, 30, 0.25);
+    WellInput p = well("PROD", WellType::Producer, 5, 5, 0, 3, 0.18); p.refDepth = 350;
+    WellInput i = well("STEAM", WellType::WaterInjector, 5, 5, 0, 3, 0.18); i.refDepth = 350;
+    c.wells = {p, i};
+    const double len[] = {30, 10, 100, 100, 125};
+    for (int cyc = 0; cyc < 3; ++cyc) for (double d : len) { ReportStep r; r.length = d; c.schedule.push_back(r); }
+    for (int cyc = 0; cyc < 3; ++cyc) {
+        const int s0 = cyc * 5;
+        WellControl inj = injCtl("STEAM", 150, 80);
+        WellControl pshut = prodCtl("PROD", Control::BHP, 5, 5); pshut.status = WellStatus::Shut;
+        WellControl ishut = injCtl("STEAM", 0, 80); ishut.status = WellStatus::Shut;
+        at(c, s0, inj); at(c, s0, pshut);
+        at(c, s0 + 1, ishut);                             // soak: both shut
+        at(c, s0 + 2, prodCtl("PROD", Control::BHP, 5, 5));
+    }
+    winjtemp(c, 0, "STEAM", 0.8, 280);
+    return c;
+}
+
+// SAGD: 2D cross-section normal to a 500 m horizontal well pair (injector 6 m above the producer)
+Case exSagd() {
+    Case c; c.title = "Thermal: SAGD well pair, 2D cross-section (E300 THERMAL)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 21, 1, 12, 2, 500, std::vector<double>(12, 2.0), 400);
+    setLayerProps(c, std::vector<double>(12, 4000), std::vector<double>(12, 0.33), 0.6);
+    sandstoneScal(c, 0.15);
+    thermalHeavyOil(c, 12);
+    c.equil.datumDepth = 400; c.equil.datumPressure = 25; c.equil.owc = 500; c.equil.goc = 300;
+    thermalEnumInit(c, 400, 25, 0.25);                  // mobile initial water: start-up communication between the wells
+    WellInput p = well("PROD", WellType::Producer, 10, 0, 10, 10, 0.18); p.refDepth = 421; p.completions[0].dir = 'Y';
+    WellInput i = well("INJ", WellType::WaterInjector, 10, 0, 7, 7, 0.18); i.refDepth = 415; i.completions[0].dir = 'Y';
+    c.wells = {p, i};
+    steps(c, 16, 91.3125);                                // 4 years
+    at(c, 0, prodCtl("PROD", Control::LRAT, 500, 20));   // liquid-rate limit
+    c.thermal.traps.push_back({"PROD", 0, 10.0});        // steam trap: produced fluid >= 10 C subcooled (BHP floor)
+    at(c, 0, injCtl("INJ", 400, 30));                     // 400 sm3/d CWE, BHP <= 30 bar
+    winjtemp(c, 0, "INJ", 0.9, 232);
+    return c;
+}
+
+// ------------------------------------------------------------------ C8: chemistry, combustion, UCG, THM
+namespace {
+ThermalComponent gasComp(const char* name, double mw, double tc, double pc, double cpg) {
+    ThermalComponent q; q.name = name; q.mw = mw; q.tcrit = tc; q.pcrit = pc; q.dead = false; q.type = 1;
+    q.kvcr[0] = 1e4; q.dref = 800; q.spechg = cpg; q.specha = cpg; q.zfactor = 1.0;
+    return q;
+}
+ThermalComponent solidComp(const char* name, double mw, double rho, double cp) {
+    ThermalComponent q; q.name = name; q.mw = mw; q.tcrit = 1e5; q.pcrit = 1; q.dead = true; q.type = 2;
+    q.dref = rho; q.specha = cp; q.zfactor = 0.96;
+    return q;
+}
+ThermalReaction reaction(const char* name, size_t nk, std::initializer_list<std::pair<int, double>> sto,
+                         std::initializer_list<std::pair<int, double>> prod, std::initializer_list<std::pair<int, double>> order,
+                         double A, double Ea, double dH, int o2pp = -1) {
+    ThermalReaction r; r.name = name; r.sto.assign(nk, 0.0); r.prod.assign(nk, 0.0); r.order.assign(nk, 0.0);
+    for (auto& x : sto) r.sto[size_t(x.first)] = x.second;
+    for (auto& x : prod) r.prod[size_t(x.first)] = x.second;
+    for (auto& x : order) r.order[size_t(x.first)] = x.second;
+    r.A = A; r.Ea = Ea; r.dH = dH; r.o2pp = o2pp;
+    return r;
+}
+// cells (i, all j, all k) of a box: hot ignition zone (dry, gas-filled)
+void ignite(Case& c, int i0, int i1, double tC, double sg) {
+    const GridInput& g = c.grid;
+    ThermalInput& T = c.thermal;
+    const double t0 = T.tempi.empty() ? 20.0 : T.tempi[0];
+    if (T.tempi.size() != size_t(g.size())) T.tempi.assign(size_t(g.size()), t0);
+    for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = i0; i <= i1; ++i) {
+        const size_t q = size_t(g.index(i, j, k));
+        T.tempi[q] = tC; c.init.swat[q] = 0.0; c.init.sgas[q] = sg;
+    }
+}
+}  // namespace
+
+// In-situ combustion (dry forward combustion) of a heavy oil in a laboratory combustion tube (1.8 m, adiabatic - guard
+// heaters): STARS-style 4-reaction kinetics (thermal cracking to coke, heavy / light oil and coke oxidation with O2
+// partial-pressure kinetics), air injection 30 sm3/m2/h, electric igniter at the inlet
+Case exCombustion() {
+    Case c; c.title = "Thermal: In-situ combustion tube (dry forward combustion, 4-reaction kinetics)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 36, 1, 1, 0.05, 0.1, {0.1}, 500);
+    setLayerProps(c, {2000}, {0.32}, 0.5);
+    sandstoneScal(c, 0.15);
+    thermalHeavyOil(c, 50);
+    ThermalInput& T = c.thermal;
+    // components: HEAVY LIGHT N2 O2 CO2 COKE (+ water)
+    T.comps.push_back(gasComp("N2", 28.01, 126.2, 33.9, 1.04));
+    T.comps.push_back(gasComp("O2", 32.0, 154.6, 50.4, 0.92));
+    T.comps.push_back(gasComp("CO2", 44.01, 304.1, 73.8, 0.84));
+    T.comps.push_back(solidComp("COKE", 13.0, 1200, 1.0));
+    T.oilViscT = {{10, 8000, 8, 1, 1, 1, 1}, {40, 1500, 4, 1, 1, 1, 1}, {80, 200, 2, 1, 1, 1, 1}, {120, 45, 1.2, 1, 1, 1, 1},
+                  {160, 15, 0.8, 1, 1, 1, 1}, {200, 6, 0.6, 1, 1, 1, 1}, {250, 3, 0.45, 1, 1, 1, 1}, {300, 1.6, 0.35, 1, 1, 1, 1}};
+    T.gasViscT = {{10, 0.008, 0.008, 0.018, 0.02, 0.015, 0.02}, {800, 0.03, 0.03, 0.04, 0.045, 0.035, 0.04}};
+    T.zi = {0.8, 0.2, 0, 0, 0, 0};
+    const size_t nk = 7;   // nc + 1
+    T.reactions = {
+        reaction("CRACK", nk, {{0, 1}}, {{1, 2}, {5, 14.6}}, {{0, 1}}, 1.2e5, 1.3e5, -5e4),
+        reaction("HEAVYBURN", nk, {{0, 1}, {3, 56.52}}, {{4, 40.37}, {6, 32.30}}, {{0, 1}, {3, 1}}, 1.0, 8.0e4, 2.37e7, 3),
+        reaction("LIGHTBURN", nk, {{1, 1}, {3, 19.25}}, {{4, 12.832}, {6, 12.832}}, {{1, 1}, {3, 1}}, 1.0, 8.0e4, 8.1e6, 3),
+        reaction("COKEBURN", nk, {{5, 1}, {3, 1.245}}, {{4, 1}, {6, 0.49}}, {{5, 1}, {3, 1}}, 0.6, 8.0e4, 5.2e5, 3)};
+    T.heatLoss = false;                                   // adiabatic tube
+    CompStream air; air.name = "AIR"; air.z = {0, 0, 0.79, 0.21, 0, 0};
+    T.streams = {air};
+    thermalEnumInit(c, 500, 20, 0.2);
+    const int n = c.grid.size();
+    c.init.sgas.assign(size_t(n), 0.15);
+    T.ymf.assign(size_t(n) * 6, 0.0);
+    for (int q = 0; q < n; ++q) T.ymf[size_t(2) * size_t(n) + size_t(q)] = 1.0;   // initial gas: N2
+    T.xmf.assign(size_t(n) * 6, 0.0);
+    for (int q = 0; q < n; ++q) { T.xmf[size_t(q)] = 0.8; T.xmf[size_t(n) + size_t(q)] = 0.2; }
+    ignite(c, 0, 1, 400, 0.5);                            // electric igniter: hot, dry start-up zone at the inlet
+    WellInput p = well("PROD", WellType::Producer, 35, 0, 0, 0, 0.02); p.completions[0].dir = 'X';
+    WellInput i = well("AIRINJ", WellType::GasInjector, 0, 0, 0, 0, 0.02); i.completions[0].dir = 'X';
+    c.wells = {p, i};
+    steps(c, 12, 1.0 / 24);                               // 12 hours, hourly reports
+    at(c, 0, prodCtl("PROD", Control::BHP, 19.5, 19.5));
+    at(c, 0, injCtl("AIRINJ", 7.2, 60));                  // 0.3 sm3/h = 30 sm3/m2/h
+    c.schedule[0].injStreams.push_back({"AIRINJ", "AIR"});
+    winjtemp(c, 0, "AIRINJ", 0, 50);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    return c;
+}
+
+// Underground coal gasification (UCG): linked-well channel in a coal seam, O2-enriched air; coal pyrolysis (volatiles),
+// char combustion / partial oxidation, steam and CO2 (Boudouard) gasification, reversible water-gas shift, gas-phase
+// CO / H2 / CH4 burning; coal is a solid component - the burnt cavity opens pore space (Kozeny-Carman permeability)
+Case exUcg() {
+    Case c; c.title = "Thermal: Underground coal gasification (linked vertical wells, THMC chemistry)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 25, 1, 3, 2, 5, {1.5, 1.5, 1.5}, 600);
+    setLayerProps(c, {5, 5, 2000}, {0.85, 0.85, 0.85}, 0.5);   // reactive pore space (coal + void); channel in the base layer
+    sandstoneScal(c, 0.10);
+    thermalHeavyOil(c, 30);
+    ThermalInput& T = c.thermal;
+    T.comps.clear();
+    T.comps.push_back(solidComp("COAL", 12.5, 1350, 1.3));
+    T.comps.push_back(solidComp("CHAR", 12.0, 1500, 1.2));
+    T.comps.push_back(gasComp("O2", 32.0, 154.6, 50.4, 0.92));
+    T.comps.push_back(gasComp("N2", 28.01, 126.2, 33.9, 1.04));
+    T.comps.push_back(gasComp("CO2", 44.01, 304.1, 73.8, 0.84));
+    T.comps.push_back(gasComp("CO", 28.01, 132.9, 35.0, 1.04));
+    T.comps.push_back(gasComp("H2", 2.016, 33.2, 13.0, 14.3));
+    T.comps.push_back(gasComp("CH4", 16.04, 190.6, 46.0, 2.2));
+    T.oilViscT.clear();
+    T.gasViscT = {{10, 0.02, 0.02, 0.02, 0.018, 0.015, 0.018, 0.009, 0.011}, {1200, 0.05, 0.05, 0.055, 0.05, 0.048, 0.05, 0.025, 0.035}};
+    T.zi = {0, 0, 0, 1, 0, 0, 0, 0};
+    T.heatcr = {2347}; T.thconr = {130};
+    T.solidConc = {1.0165e5, 0, 0, 0, 0, 0, 0, 0};       // 80 % of the bulk volume is coal (mol / m3 of pore volume)
+    T.permLaw = 1; T.permMultMax = 1e4;
+    const size_t nk = 9;   // COAL CHAR O2 N2 CO2 CO H2 CH4 + water(8)
+    std::vector<ThermalReaction> R = {
+        reaction("PYROLYSIS", nk, {{0, 1}}, {{1, 0.7}, {7, 0.1}, {6, 0.1}, {5, 0.05}, {8, 0.05}}, {{0, 1}}, 1e2, 1.0e5, -1.5e3),
+        reaction("CHARBURN", nk, {{1, 1}, {2, 1}}, {{4, 1}}, {{1, 1}, {2, 1}}, 0.036, 1.3e5, 3.935e5, 2),
+        reaction("PARTOX", nk, {{1, 2}, {2, 1}}, {{5, 2}}, {{1, 1}, {2, 1}}, 1.0, 1.6e5, 2.21e5, 2),
+        reaction("STEAMGASIF", nk, {{1, 1}, {8, 1}}, {{5, 1}, {6, 1}}, {{1, 1}, {8, 1}}, 1.0, 2.0e5, -1.313e5),
+        reaction("BOUDOUARD", nk, {{1, 1}, {4, 1}}, {{5, 2}}, {{1, 1}, {4, 1}}, 1.0, 2.1e5, -1.725e5),
+        reaction("SHIFT", nk, {{5, 1}, {8, 1}}, {{4, 1}, {6, 1}}, {{5, 1}, {8, 1}}, 0.25, 1.0e5, 4.11e4),
+        reaction("COBURN", nk, {{5, 1}, {2, 0.5}}, {{4, 1}}, {{5, 1}, {2, 1}}, 90, 1.2e5, 2.83e5, 2),
+        reaction("H2BURN", nk, {{6, 1}, {2, 0.5}}, {{8, 1}}, {{6, 1}, {2, 1}}, 90, 1.2e5, 2.42e5, 2),
+        reaction("CH4BURN", nk, {{7, 1}, {2, 2}}, {{4, 1}, {8, 2}}, {{7, 1}, {2, 1}}, 90, 1.4e5, 8.02e5, 2)};
+    R[3].phase.assign(nk, -1); R[3].phase[8] = 2;         // steam gasification: water vapour
+    R[5].phase.assign(nk, -1); R[5].phase[8] = 2;
+    R[5].reversible = true; R[5].keqA = -4.33; R[5].keqB = 4577.8;   // Moe (1962) shift equilibrium
+    T.reactions = R;
+    CompStream ox; ox.name = "OXYAIR"; ox.z = {0, 0, 0.4, 0.6, 0, 0, 0, 0};
+    T.streams = {ox};
+    thermalEnumInit(c, 600, 30, 0.4);
+    const int n = c.grid.size();
+    c.init.sgas.assign(size_t(n), 0.6);
+    T.ymf.assign(size_t(n) * 8, 0.0);
+    for (int q = 0; q < n; ++q) T.ymf[size_t(3) * size_t(n) + size_t(q)] = 1.0;   // initial gas: N2
+    T.xmf.assign(size_t(n) * 8, 0.0);
+    for (int q = 0; q < n; ++q) T.xmf[size_t(3) * size_t(n) + size_t(q)] = 1.0;
+    ignite(c, 0, 1, 650, 1.0);                            // ignition zone at the injection well
+    WellInput p = well("PROD", WellType::Producer, 24, 0, 2, 2, 0.2);
+    WellInput i = well("INJ", WellType::GasInjector, 0, 0, 2, 2, 0.2);
+    c.wells = {p, i};
+    steps(c, 15, 2);                                      // 30 days
+    at(c, 0, prodCtl("PROD", Control::BHP, 25, 25));
+    at(c, 0, injCtl("INJ", 1500, 60));
+    c.schedule[0].injStreams.push_back({"INJ", "OXYAIR"});
+    winjtemp(c, 0, "INJ", 0, 30);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    return c;
+}
+
+// UCG + CO2 storage in one thermal run (C10, unified framework): the UCG channel of exUcg with dissolved gases (IAPWS
+// Henry constants), a Peng-Robinson gas, Land gas hysteresis, ash CaO carbonation by aqueous CO2 (mineral trapping) and,
+// after 30 days of gasification, CO2 injection into the cavity with the producer shut, then a shut-in period
+Case exUcgCo2() {
+    Case c = exUcg();
+    c.title = "Thermal: UCG syngas production + CO2 storage in the cavity (unified trapping, THMC)";
+    ThermalInput& T = c.thermal;
+    const int n = c.grid.size();
+    const size_t ncOld = T.comps.size();   // 8: COAL CHAR O2 N2 CO2 CO H2 CH4
+    T.comps.push_back(solidComp("CAO", 56.08, 3340, 0.75));
+    T.comps.push_back(solidComp("CALCITE", 100.09, 2710, 0.84));
+    T.comps[0].formula = "C0.85H0.7O0.1";   // coal pseudo-formula consistent with the pyrolysis stoichiometry
+    T.comps[1].formula = "C";
+    T.comps[8].formula = "CaO";
+    T.comps[9].formula = "CaCO3"; T.comps[9].trackEq = 1;
+    for (auto& q : T.comps) {
+        if (q.type == 2) continue;
+        const gasdata::GasInfo* gi = gasdata::find(q.name);
+        if (gi && gi->hA != 0) { q.aqModel = 1; q.hA = gi->hA; q.hB = gi->hB; q.hC = gi->hC; q.vInf = gi->vInf; q.ksalt = gi->ksalt; }
+    }
+    T.gasPR = true; T.salinity = 0.1; T.hystGas = true; T.sgtMax = 0.25; T.track = "CO2"; T.structTol = 0.01;
+    for (auto& r : T.gasViscT) { r.push_back(0.02); r.push_back(0.02); }
+    T.zi.resize(ncOld + 2, 0.0);
+    T.solidConc.resize(ncOld + 2, 0.0); T.solidConc[8] = 500;   // ash CaO, mol / m3 of pore volume
+    for (auto& st : T.streams) st.z.resize(ncOld + 2, 0.0);
+    T.xmf.resize(size_t(n) * (ncOld + 2), 0.0); T.ymf.resize(size_t(n) * (ncOld + 2), 0.0);
+    auto widen = [&](std::vector<double>& v, double fill) { if (v.size() == ncOld + 1) v.insert(v.begin() + long(ncOld), 2, fill); };
+    for (auto& r : T.reactions) {
+        widen(r.sto, 0.0); widen(r.prod, 0.0); widen(r.order, 0.0);
+        if (r.phase.size() == ncOld + 1) r.phase.insert(r.phase.begin() + long(ncOld), 2, -1);
+    }
+    const size_t nk = ncOld + 3;
+    ThermalReaction carb = reaction("CARBONATION", nk, {{4, 1}, {8, 1}}, {{9, 1}}, {{4, 1}, {8, 1}}, 1.0, 5.0e4, 1.6e5);
+    carb.phase.assign(nk, -1); carb.phase[4] = 0;   // CO2 reacts from the aqueous phase (dissolved CO2 + ash: CarbFix-type)
+    T.reactions.push_back(carb);
+    CompStream co2; co2.name = "CO2INJ"; co2.z.assign(ncOld + 2, 0.0); co2.z[4] = 1.0;
+    T.streams.push_back(co2);
+    // schedule: 30 d gasification (exUcg); 30 d water quench of the hot cavity (oxidant off, steam / syngas produced);
+    // 60 d CO2 injection into the cooled cavity (producer shut); 150 d shut-in (dissolution, residual, mineral trapping)
+    WellInput q = well("QUENCH", WellType::WaterInjector, 1, 0, 2, 2, 0.2);
+    c.wells.push_back(q);
+    WellControl qshut = injCtl("QUENCH", 0, 60); qshut.status = WellStatus::Shut;
+    at(c, 0, qshut);
+    const int s0 = int(c.schedule.size());
+    steps(c, 3, 10);
+    steps(c, 6, 10);
+    steps(c, 5, 30);
+    WellControl ishut = injCtl("INJ", 0, 120); ishut.status = WellStatus::Shut;
+    at(c, s0, ishut);
+    at(c, s0, injCtl("QUENCH", 15, 60));
+    winjtemp(c, s0, "QUENCH", 0, 20);
+    T.winj.back().quality = -1; T.winj.back().pres = 0;   // cold liquid water
+    WellControl qoff = injCtl("QUENCH", 0, 60); qoff.status = WellStatus::Shut;
+    WellControl pshut = prodCtl("PROD", Control::BHP, 25, 25); pshut.status = WellStatus::Shut;
+    at(c, s0 + 3, qoff); at(c, s0 + 3, pshut);
+    at(c, s0 + 3, injCtl("INJ", 80, 120));
+    c.schedule[size_t(s0 + 3)].injStreams.push_back({"INJ", "CO2INJ"});
+    winjtemp(c, s0 + 3, "INJ", 0, 30);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    at(c, s0 + 9, ishut);
+    return c;
+}
+
+// C12: CO2-enhanced coal-bed methane (ECBM) - Langmuir sorption on a shared site species (extended / competitive
+// isotherm, van 't Hoff temperature dependence, sorption time constant). One year of primary depletion (dewatering +
+// CH4 desorption), then four years of CO2 injection: CO2 (higher affinity) displaces sorbed CH4.
+Case exEcbm() {
+    Case c; c.title = "Thermal core: CO2-ECBM - competitive Langmuir desorption of coal-bed methane by CO2";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 11, 11, 1, 30, 30, {4}, 700);
+    setLayerProps(c, {5}, {0.02}, 0.1);                   // cleat system: 2 % porosity, 5 mD
+    sandstoneScal(c, 0.10);
+    thermalHeavyOil(c, 35);
+    ThermalInput& T = c.thermal;
+    T.comps = {gasComp("CH4", 16.04, 190.6, 46.0, 2.2), gasComp("CO2", 44.01, 304.1, 73.8, 0.84)};
+    T.oilViscT.clear();
+    T.gasViscT = {{10, 0.0105, 0.0140}, {300, 0.0190, 0.0260}};
+    T.zi = {1, 0};
+    T.heatLoss = false;
+    // Langmuir (Busch & Gensterblum 2011 ranges): V_L 8.77 m3/t (CH4) x 1.4 t/m3 coal / 0.02241 m3/mol = 548 mol/m3 bulk;
+    // P_L 6.69 MPa (CH4), 2.9 MPa (CO2 - selectivity ~2.3); heats of adsorption 15 / 25 kJ/mol; sorption time 2 d
+    ThermalSorb a; a.comp = "CH4"; a.capacity = 548; a.b = 1 / 6690.0; a.tRef = 308.15; a.dH = 15e3; a.tau = 2 * 86400.0;
+    ThermalSorb b = a; b.comp = "CO2"; b.b = 1 / 2900.0; b.dH = 25e3;
+    T.sorb = {a, b};
+    thermalEnumInit(c, 700, 70, 0.4);
+    const int n = c.grid.size();
+    c.init.sgas.assign(size_t(n), 0.6);
+    T.ymf.assign(size_t(n) * 2, 0.0); T.xmf.assign(size_t(n) * 2, 0.0);
+    for (int q = 0; q < n; ++q) { T.ymf[size_t(q)] = 1.0; T.xmf[size_t(q)] = 1.0; }
+    CompStream co2; co2.name = "CO2INJ"; co2.z = {0, 1};
+    T.streams = {co2};
+    WellInput p = well("PROD", WellType::Producer, 10, 10, 0, 0, 0.2);
+    WellInput i = well("INJ", WellType::GasInjector, 0, 0, 0, 0, 0.2);
+    c.wells = {p, i};
+    steps(c, 4, 91.25);                                   // primary depletion
+    steps(c, 16, 91.25);                                  // CO2 injection
+    at(c, 0, prodCtl("PROD", Control::BHP, 10, 10));
+    WellControl ishut = injCtl("INJ", 0, 150); ishut.status = WellStatus::Shut;
+    at(c, 0, ishut);
+    at(c, 4, injCtl("INJ", 15000, 150));
+    c.schedule[4].injStreams.push_back({"INJ", "CO2INJ"});
+    winjtemp(c, 4, "INJ", 0, 35);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    return c;
+}
+
+// EGS doublet with embedded discrete fractures (C12): cold water circulated through a stimulated fracture network in hot
+// granite. The main fracture links the wells; two oblique fractures cross it (f-f intersection transmissibility). Barton-
+// Bandis normal closure and Coulomb shear dilation respond to the pore pressure and the thermal unloading of the rock.
+Case exEgsEdfm() {
+    Case c; c.title = "Thermal core: EGS doublet in granite with embedded discrete fractures (EDFM + Barton-Bandis + hydro-shear)";
+    c.units = UnitSystem::Metric;
+    boxGrid(c, 21, 11, 3, 25, 25, {50, 50, 50}, 3000);
+    setLayerProps(c, {0.01, 0.01, 0.01}, {0.01, 0.01, 0.01}, 1.0);   // tight granite: 0.01 mD, 1 % porosity
+    sandstoneScal(c, 0.0);
+    thermalHeavyOil(c, 200);
+    ThermalInput& T = c.thermal;
+    T.comps = {gasComp("N2", 28.01, 126.2, 33.9, 1.04)};            // inert trace gas (absent initially): water-only circulation
+    T.oilViscT.clear();
+    T.gasViscT = {{10, 0.0175}, {300, 0.0290}};
+    T.zi = {1};
+    T.heatLoss = false;
+    T.heatcr = {2400}; T.thconr = {216}; T.thconsf = {0};             // granite: 2.4 MJ/m3/K, 2.5 W/m/K (216 kJ/m/d/K)
+    c.props.rock = {300.0, 1e-6};
+    thermalEnumInit(c, 3075, 300, 1.0);
+    // fractures (metres from the box corner; full height when zTop / zBot < 0): aperture 0.4 mm, k = w^2 / 12
+    ThermalFracture f1; f1.name = "MAIN"; f1.x0 = 40; f1.y0 = 137.5; f1.x1 = 485; f1.y1 = 137.5; f1.aperture = 0.4e-3;
+    f1.mech = true; f1.kn0 = 20e9; f1.vm = 0.4e-3; f1.mu = 0.6; f1.ks = 2e9; f1.dilationDeg = 5;
+    ThermalFracture f2 = f1; f2.name = "OBL1"; f2.x0 = 150; f2.y0 = 40; f2.x1 = 230; f2.y1 = 235; f2.aperture = 0.3e-3;
+    ThermalFracture f3 = f1; f3.name = "OBL2"; f3.x0 = 300; f3.y0 = 235; f3.x1 = 380; f3.y1 = 40; f3.aperture = 0.3e-3;
+    T.fractures = {f1, f2, f3};
+    T.fracStress.sHmaxGrad = 26e3; T.fracStress.sHminGrad = 17e3; T.fracStress.azimuthDeg = 30;
+    T.fracStress.E = 40e9; T.fracStress.nu = 0.25; T.fracStress.alphaT = 8e-6;
+    WellInput p = well("PROD", WellType::Producer, 18, 5, 0, 2, 0.2);
+    WellInput i = well("INJ", WellType::WaterInjector, 2, 5, 0, 2, 0.2);
+    c.wells = {p, i};
+    steps(c, 20, 91.25);                                  // 5 years, quarterly
+    at(c, 0, prodCtl("PROD", Control::BHP, 280, 280));
+    at(c, 0, injCtl("INJ", 2000, 450));                   // ~23 kg/s
+    winjtemp(c, 0, "INJ", 0, 50);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    return c;
+}
+
+// C13: parametric FORGE-style multi-stage EGS doublet (see EgsDesign in examples.h) - public, outside the anonymous namespace
+}  // namespace
+bool egsStimulation(const EgsDesign& d, hf::Result& r) {
+    hf::Input in;
+    in.model = d.stimModel == 1 ? 1 : 0;
+    in.E = d.rockE; in.nu = d.rockNu; in.height = std::max(1.0, d.fracHeight); in.mu = d.stimMu; in.rate = d.stimRate;
+    in.cl = d.stimCl; in.kic = d.stimKic; in.sigmaMin = d.sHminGrad * d.depth; in.tEnd = d.stimTime;
+    in.cells = in.model == 0 ? 300 : 120; in.outputs = 12;
+    return hf::simulateAdaptive(in, r);
+}
+Case makeEgsCase(const EgsDesign& d0) {
+    EgsDesign d = d0;
+    double stimL = 0, stimAp = 0;
+    if (d.stimulate) {
+        hf::Result r;
+        if (!egsStimulation(d, r)) throw std::runtime_error("EGS stimulation sizing failed: " + r.error);
+        stimL = r.last().L;
+        stimAp = std::max(1e-6, d.stimRetain * r.meanWidth());
+    }
+    d.stages = std::max(1, std::min(40, d.stages));
+    d.cell = std::max(5.0, d.cell); d.nz = std::max(3, std::min(30, d.nz));
+    d.spacing = std::max(2.0 * d.refineFirst, d.spacing);
+    Case c;
+    char t[200]; std::snprintf(t, sizeof t, "Thermal core: multi-stage EGS doublet (%d EDFM fractures, %.0f m apart, wells %.0f m apart, %.0f C)",
+                               d.stages, d.spacing, d.wellSep, d.tRes);
+    c.title = t;
+    c.units = UnitSystem::Metric;
+    const double margX = std::max(100.0, 2 * d.cell), margZ = 50.0;
+    const double margY = d.stimulate ? std::max(125.0, stimL + 3 * d.cell) : std::max(125.0, d.fracExt + 3 * d.cell);
+    const double lat = d.stages * d.spacing;
+    // column widths along x: margins with uniform cells; around every plane a cell of refineFirst holding it, growing by
+    // refineRatio up to the coarse size until half way to the next plane
+    std::vector<double> wx, fracX;
+    auto uniform = [&](double len) { const int m = std::max(1, int(std::ceil(len / d.cell - 1e-9))); for (int k = 0; k < m; ++k) wx.push_back(len / m); };
+    uniform(margX);
+    for (int s = 0; s < d.stages; ++s) {
+        const double half = 0.5 * d.spacing;
+        std::vector<double> side;   // widths from the plane outwards, filling half - refineFirst / 2
+        if (d.refine) {
+            double rem = half - 0.5 * d.refineFirst, w = d.refineFirst * d.refineRatio;
+            while (rem > 1e-9) {
+                double ww = std::min({w, d.cell, rem});
+                if (rem - ww < 0.5 * std::min(w, d.cell)) ww = rem;   // no sliver at the midpoint
+                side.push_back(ww); rem -= ww; w *= d.refineRatio;
+            }
+            for (size_t k = side.size(); k-- > 0;) wx.push_back(side[k]);
+            fracX.push_back(margX + (s + 0.5) * d.spacing);
+            wx.push_back(d.refineFirst);
+            for (double v : side) wx.push_back(v);
+        } else {
+            const int m = std::max(1, int(std::ceil(d.spacing / d.cell - 1e-9)));
+            for (int k = 0; k < m; ++k) wx.push_back(d.spacing / m);
+            fracX.push_back(margX + (s + 0.5) * d.spacing + 1e-3 * d.cell);   // off the cell faces
+        }
+    }
+    uniform(margX);
+    const int nx = int(wx.size());
+    const int ny = std::max(3, int(std::ceil((d.wellSep + 2 * margY) / d.cell)));
+    std::vector<double> dzl = {margZ};
+    for (int k = 0; k < d.nz - 2; ++k) dzl.push_back(d.fracHeight / (d.nz - 2));
+    dzl.push_back(margZ);
+    const double H = d.fracHeight + 2 * margZ;
+    const double top = d.depth - 0.5 * H;
+    boxGrid(c, nx, ny, d.nz, d.cell, d.cell, dzl, top);
+    for (size_t q = 0; q < c.grid.dx.size(); ++q) c.grid.dx[q] = wx[q % size_t(nx)];
+    setLayerProps(c, std::vector<double>(size_t(d.nz), d.kMatrix), std::vector<double>(size_t(d.nz), d.poro), 1.0);
+    sandstoneScal(c, 0.0);
+    thermalHeavyOil(c, d.tRes);
+    ThermalInput& T = c.thermal;
+    T.comps = {gasComp("N2", 28.01, 126.2, 33.9, 1.04)};
+    T.oilViscT.clear();
+    T.gasViscT = {{10, 0.0175}, {300, 0.0290}};
+    T.zi = {1};
+    T.heatLoss = false;
+    T.heatcr = {2400}; T.thconr = {216}; T.thconsf = {0};
+    c.props.rock = {300.0, 1e-6};
+    const double pTop = 1.01325 + 1000.0 * 9.80665 * top / 1e5;
+    thermalEnumInit(c, top, pTop, 1.0);
+    // wells: horizontal along x through the stage region, in the layer at the wells' depth
+    const double yI = margY, yP = margY + d.wellSep;
+    const int jI = std::min(ny - 1, int(yI / d.cell)), jP = std::min(ny - 1, int(yP / d.cell));
+    int kW = 0; { double z = top; for (int k = 0; k < d.nz; ++k) { if (d.depth >= z && d.depth < z + dzl[size_t(k)]) kW = k; z += dzl[size_t(k)]; } }
+    int i0 = nx - 1, i1 = 0;
+    { double x = 0; for (int i = 0; i < nx; ++i) { const double xc = x + 0.5 * wx[size_t(i)]; if (xc > margX && xc < margX + lat) { i0 = std::min(i0, i); i1 = std::max(i1, i); } x += wx[size_t(i)]; } }
+    auto horiz = [&](const std::string& nm, WellType ty, int j) {
+        WellInput w; w.name = nm; w.type = ty; w.i = i0; w.j = j; w.group = ty == WellType::Producer ? "PROD" : "INJ";
+        for (int i = i0; i <= i1; ++i) { Completion cp; cp.i = i; cp.j = j; cp.k1 = cp.k2 = kW; cp.diameter = 0.2; cp.dir = 'X'; w.completions.push_back(cp); }
+        w.refDepth = d.depth;
+        return w;
+    };
+    c.wells = {horiz("PROD", WellType::Producer, jP), horiz("INJ", WellType::WaterInjector, jI)};
+    // transverse fractures (planes x = const), centred on the wells' depth
+    for (int s = 0; s < d.stages; ++s) {
+        ThermalFracture f; f.name = "STAGE" + std::to_string(s + 1);
+        f.x0 = f.x1 = fracX[size_t(s)]; f.y0 = yI - d.fracExt; f.y1 = yP + d.fracExt;
+        if (d.stimulate) { f.y0 = yI - stimL; f.y1 = yI + stimL; }
+        f.zTop = d.depth - 0.5 * d.fracHeight; f.zBot = d.depth + 0.5 * d.fracHeight;
+        f.aperture = d.stimulate ? stimAp : d.aperture; f.mech = d.mech; f.kn0 = 20e9; f.vm = 0.4e-3; f.mu = 0.6; f.ks = 2e9; f.dilationDeg = 5;
+        T.fractures.push_back(f);
+    }
+    T.fracStress.sHmaxGrad = d.sHmaxGrad; T.fracStress.sHminGrad = d.sHminGrad; T.fracStress.azimuthDeg = 90;
+    T.fracStress.E = d.rockE; T.fracStress.nu = d.rockNu; T.fracStress.alphaT = 8e-6;
+    const int nrep = std::max(1, int(std::lround(d.years * 4)));
+    steps(c, nrep, 365.25 * d.years / nrep);
+    const double pW = 1.01325 + 1000.0 * 9.80665 * d.depth / 1e5;
+    at(c, 0, prodCtl("PROD", Control::BHP, pW - d.drawdown, pW - d.drawdown));
+    at(c, 0, injCtl("INJ", d.rate, pW + 150));
+    winjtemp(c, 0, "INJ", 0, d.tInj);
+    T.winj.back().quality = 0; T.winj.back().pres = 0;
+    return c;
+}
+namespace {
+
+// C15: shale gas, multistage hydraulically fractured horizontal well (EDFM fractures in the black-oil grid, Langmuir
+// adsorbed gas, stress-dependent fracture conductivity)
+Case exShaleMultistage() {
+    const char* deck = R"(RUNSPEC
+TITLE
+Shale gas - 10-stage fractured horizontal well
+DIMENS
+ 61 31 3 /
+OIL
+WATER
+GAS
+METRIC
+TABDIMS
+ 1 1 20 20 /
+WELLDIMS
+ 1 60 1 1 /
+START
+ 1 JAN 2025 /
+GRID
+DX
+ 5673*20 /
+DY
+ 5673*10 /
+DZ
+ 5673*10 /
+TOPS
+ 1891*2500 1891*2510 1891*2520 /
+PORO
+ 5673*0.06 /
+PERMX
+ 5673*0.0005 /
+PERMY
+ 5673*0.0005 /
+PERMZ
+ 5673*0.0001 /
+-- RESSIM: LANGMUIR 2.8 55 2.5
+PROPS
+PVDO
+ 20 1.05 1.0
+ 400 1.00 1.0 /
+PVDG
+ 20 0.0600 0.0140
+ 50 0.0240 0.0150
+ 100 0.0120 0.0170
+ 150 0.0081 0.0190
+ 200 0.0062 0.0210
+ 250 0.0051 0.0230
+ 300 0.0044 0.0250
+ 350 0.0039 0.0270 /
+PVTW
+ 300 1.0 4e-5 0.4 0 /
+DENSITY
+ 800 1020 0.75 /
+ROCK
+ 300 4e-5 /
+SWOF
+ 0.30 0 1 0
+ 0.50 0.05 0.3 0
+ 1.00 1 0 0 /
+SGOF
+ 0 0 1 0
+ 0.20 0.10 0.2 0
+ 0.70 0.80 0 0 /
+SOLUTION
+EQUIL
+ 2515 300 3000 0 2700 0 /
+SCHEDULE
+WELSPECS
+ HZ1 FIELD 6 16 2515 GAS /
+/
+COMPDAT
+ HZ1 6 16 2 2 OPEN 1* 1* 0.12 3* X /
+ HZ1 7 16 2 2 OPEN 1* 1* 0.12 3* X /
+/
+WCONPROD
+ HZ1 OPEN BHP 5* 50 /
+/
+TSTEP
+ 10*3 10*30 12*91.25 6*365 /
+END
+)";
+    Case c = eclipseDeckFromString(deck, "");
+    WellInput& w = c.wells[0];
+    w.completions.clear();
+    for (int i = 5; i <= 55; ++i) {   // 1000 m lateral along x in layer 2
+        Completion cp; cp.i = i; cp.j = 15; cp.k1 = cp.k2 = 1; cp.dir = 'X'; cp.diameter = 0.12;
+        w.completions.push_back(cp);
+    }
+    hf::StageLayout L;
+    L.well = w.name; L.stages = 10; L.halfLength = 110; L.height = 30; L.width = 0.003;
+    L.perm = 50000; L.poro = 0.35; L.gamma = 0.002;
+    c.grid.hfracs = hf::layoutStages(c, L);
+    c.title = "Shale gas - 10-stage fractured horizontal well";
+    return c;
+}
+Case exEgsMultistage() { return makeEgsCase(EgsDesign{}); }
+
+// THM: SAGD with coupled geomechanics - thermal expansion and pore-pressure increase heave the overburden (fixed-stress
+// iterative coupling, FEM mesh padded with 400 m overburden, 100 m underburden and 200 m side-burden)
+Case exSagdThm() {
+    Case c = exSagd();
+    c.title = "Thermal + geomechanics (THM): SAGD heave and stress change";
+    c.schedule.resize(8);                                 // 2 years
+    geomech::Input& G = c.thermal.geo;
+    G.enabled = true; G.coupling = 1;
+    G.E = {0.5e9}; G.nu = {0.3}; G.biot = {1.0}; G.alphaT = {2e-5};
+    G.overLayers = 4; G.overThick = 400; G.underLayers = 2; G.underThick = 100; G.sidePad = 3; G.sideThick = 200;
+    G.padE = 1.5e9; G.padNu = 0.3; G.padAlphaT = 1e-5;
+    G.sigmaVGrad = 21e3; G.k0 = 0.7; G.cohesion = 0.5e6; G.frictionDeg = 30; G.tensile = 0.2e6;
+    c.thermal.permLaw = 2; c.thermal.permC = 30; c.thermal.permMultMax = 50;   // dilation-enhanced permeability
+    return c;
+}
+
+// CO2 EOR: SPE5 reservoir and oil with CO2 as a 7th EOS component, water-alternating-CO2 (WAG) and CO2SOL (CO2 dissolves
+// in the brine), E300 style - no separate CO2 module
+Case exCo2Eor() {
+    Case c; c.title = "Advanced: CO2 EOR - WAG with CO2 as an EOS component (SPE5 + CO2, CO2SOL, 7x7x3)";
+    c.units = UnitSystem::Field;
+    boxGrid(c, 7, 7, 3, 500, 500, {20, 30, 50}, 8325);
+    setLayerProps(c, {500, 50, 200}, {0.3, 0.3, 0.3}, 0.1);
+    spe1Fluids(c, false);
+    c.phases = Phases{true, true, true, false};
+    sandstoneScal(c, 0.2);
+    c.props.rock = {4000.0, 5e-6};
+    c.comp.enabled = true; c.comp.structured = true;
+    c.comp.fluid = spe5Co2CompFluid(1.0);
+    c.comp.streams = {{"CO2", {0, 0, 0, 0, 0, 0, 1.0}}};
+    c.comp.separator = {{eos::fahrenheitToK(80), eos::psiaToPa(315)}, {eos::fahrenheitToK(60), eos::psiaToPa(14.696)}};
+    c.equil.datumDepth = 8400; c.equil.datumPressure = 4000; c.equil.owc = 8450; c.equil.goc = 7000;
+    WellInput p = well("PROD", WellType::Producer, 6, 6, 2, 2); p.refDepth = 8400;
+    WellInput i = well("INJ", WellType::GasInjector, 0, 0, 0, 0); i.refDepth = 8335;
+    c.wells = {p, i};
+    steps(c, 40, 91.3125);   // 10 years, quarterly reports
+    at(c, 0, prodCtl("PROD", Control::ORAT, 3000, 1000));
+    // year 1: primary depletion; then 1-year CO2 / water half-cycles (WAG ratio 1:1)
+    for (int s = 4; s < 40; s += 4) {
+        const bool gas = ((s / 4) % 2) == 1;
+        WellControl w = injCtl("INJ", gas ? 6000 : 5000, 6000);
+        w.phase = gas ? 2 : 1;
+        at(c, s, w);
+        if (gas) c.schedule[size_t(s)].injStreams.push_back({"INJ", "CO2"});
+    }
+    return c;
+}
 
 const std::vector<Entry>& registry() {
     static const std::vector<Entry> R = {
@@ -726,6 +1536,96 @@ const std::vector<Entry>& registry() {
           "Water races through the fractures (early breakthrough) while oil is recovered slowly by capillary imbibition "
           "from the matrix (Kazemi sigma, T = CDARCY V sigma K). Compare SWAT in the matrix and fracture layers, try a "
           "smaller SIGMA (bigger blocks), or switch to DUALPERM in Grid & rock.", "15 x 15 x (3 matrix + 3 fracture)", 2}, exDualPorosity},
+        {{"lgr", "Local grid refinement (LGR)", ExampleLevel::Advanced,
+          "Near-well CARFIN refinements around both wells (graded HXFIN/HYFIN, split layers) and a sub-grid channel.",
+          "ECLIPSE / OPM-compatible Cartesian LGRs: WELSPECL / COMPDATL wells, NXFIN-style grading towards the producer, a "
+          "high-permeability streak thinner than one host cell (local PERMX in CARFIN ... ENDFIN). Compare the water front in the "
+          "refined region with the coarse cells, or delete an LGR in Grid & rock and rerun.", "21 x 21 x 4 + 3 LGRs (2178 local cells)", 3}, exLocalRefinement},
+        {{"comp", "Compositional lean-gas injection (EOS)", ExampleLevel::Advanced,
+          "SPE5 six-component Peng-Robinson fluid; lean gas (WELLSTRE / WINJGAS) injected after one year of depletion.",
+          "Fully implicit compositional (natural variables, EOS flash). Open Fluid > Compositional to see the phase envelope, "
+          "flash a composition and edit the BIC matrix; in Results look at the oil / gas saturation and the producing GOR "
+          "as the injected gas vaporises the intermediate components.", "7 x 7 x 3 Cartesian, 6 components", 15}, exCompositional},
+        {{"co2", "CO2 storage in a saline aquifer (CO2STORE)", ExampleLevel::Advanced,
+          "300 t/d CO2 for 10 years into a dipping brine aquifer, then 40 years of post-injection migration.",
+          "Dedicated CO2STORE model: Spycher-Pruess / Duan-Sun solubility, brine density increase on dissolution, "
+          "residual trapping (Sgc 0.05). Results > CO2 storage shows the mobile / trapped / dissolved inventory; the XCO2 "
+          "property shows the dissolved plume sinking below the gas tongue.", "40 x 1 x 20 cross-section, 2 deg dip", 20}, exCo2Storage},
+        {{"co2trap", "CO2 trapping mechanisms and interactions (CO2STORE)", ExampleLevel::Advanced,
+          "The CO2 aquifer with a caprock, gas hysteresis (Land), diffusion, salt precipitation and mineral carbonation.",
+          "Every trapping mechanism at once: structural (caprock), residual (Carlson / Land hysteresis, Sgt,max 0.25), "
+          "solubility (dissolution + molecular diffusion), mineral (anorthite carbonation) and dry-out salt near the injector. "
+          "Fluid > CO2 storage > Trapping & interactions holds all settings; Results > CO2 storage shows the five-class "
+          "inventory, and the SGTRAP / SGMAX / MINCO2 / SSALT / PORFAC maps the per-cell state.", "40 x 1 x 20 cross-section, caprock", 45}, exCo2Trapping},
+        {{"co2eor", "CO2 EOR: WAG with CO2 as an EOS component (CO2SOL)", ExampleLevel::Advanced,
+          "SPE5 oil + CO2 (7-component PR EOS): one year of depletion, then 1-year CO2 / water alternating injection.",
+          "CO2 is simply the 7th EOS component - it develops miscibility with the oil by vaporising / condensing exchange and "
+          "also dissolves in the brine (CO2SOL, Spycher-Pruess / Duan-Sun Henry function). Results: ZMF / XMF / YMF / AMF of "
+          "CO2 per cell, producing GOR and the CO2 breakthrough; Fluid > Compositional > CO2 EOR tools: MMP, swelling test, "
+          "WAG schedule generator.", "7 x 7 x 3 Cartesian, 7 components + water", 30}, exCo2Eor},
+        {{"steamflood", "Thermal: steamflood of a heavy-oil reservoir (E300 THERMAL)", ExampleLevel::Advanced,
+          "Quarter five-spot, 80 % quality steam at 240 C into a 25 C heavy oil (2-component K-value fluid).",
+          "ResSim thermal core (STARS-like fully implicit p / N / U formulation): steam zone at Tsat(p), steam distillation of "
+          "the LIGHT component, viscosity reduction (OILVISCT), heat loss to over / underburden. Results: TEMP, SGAS (steam), "
+          "oil rate response and the cumulative steam-oil ratio.", "9 x 9 x 3 Cartesian, 2 components + water", 80}, exSteamflood},
+        {{"css", "Thermal: cyclic steam stimulation (huff and puff)", ExampleLevel::Advanced,
+          "Three cycles of 30 d steam injection, 10 d soak and 325 d production from one vertical well.",
+          "Injector and producer are completed in the same column and alternate (WCONINJE / WCONPROD + SHUT). Watch the heated "
+          "zone grow and cool between cycles and the oil-rate peaks after each soak.", "11 x 11 x 4 Cartesian (refined to 2 m at the well), 2 components + water", 60}, exCss},
+        {{"sagd", "Thermal: SAGD well pair (2D cross-section)", ExampleLevel::Advanced,
+          "Steam-assisted gravity drainage: 500 m horizontal injector 6 m above the producer, 4 years.",
+          "The steam chamber rises and spreads above the injector; heated oil and condensate drain by gravity to the producer. "
+          "Results: TEMP / SGAS cross-section and the steam-oil ratio.", "21 x 1 x 12 cross-section, 2 components + water", 120}, exSagd},
+        {{"combustion", "Thermal: in-situ combustion (air injection, 4-reaction kinetics)", ExampleLevel::Advanced,
+          "Laboratory combustion tube: dry forward combustion of a heavy oil - cracking to coke, oil and coke burning (O2 kinetics).",
+          "STARS-style chemistry on the ResSim thermal core (C8): solid COKE component, non-condensable N2 / O2 / CO2, heat of "
+          "reaction, ignition zone at the air injector. Results: the combustion front (TEMP > 450 C), O2 consumption, CO2 in the "
+          "produced gas, coke deposition ahead of the front.", "36 x 1 x 1 tube (5 cm cells), 6 components + water", 30}, exCombustion},
+        {{"ucg", "Thermal: underground coal gasification (UCG)", ExampleLevel::Advanced,
+          "Linked-well UCG channel: coal pyrolysis, char combustion / gasification, water-gas shift, syngas production.",
+          "9 reactions (pyrolysis, char burning and partial oxidation, steam and Boudouard gasification, reversible shift, CO / H2 / "
+          "CH4 burning); coal is a solid component - the cavity grows as it is consumed and the permeability follows Kozeny-"
+          "Carman. Results: temperature (> 900 C), cavity porosity, CO / H2 / CH4 rates.", "25 x 1 x 3 cross-section, 8 components + water", 60}, exUcg},
+        {{"ucg_co2", "Thermal: UCG syngas + CO2 storage in the cavity (unified trapping)", ExampleLevel::Advanced,
+          "UCG channel (pyrolysis, char burning / gasification, shift) for 30 d, then CO2 injected into the hot cavity, then shut-in.",
+          "One thermal run combines syngas production and CO2 storage with the same trapping classes as the CO2STORE core: CO2 / "
+          "H2 / CO / CH4 dissolve in water (IAPWS G7-04 Henry, Sechenov salting-out), Peng-Robinson gas, Land gas hysteresis "
+          "(residual), structural, and mineral trapping by ash CaO carbonation with dissolved CO2 (CALCITE, FORMULA trackEq). "
+          "Results: CO2 storage tab, XMF / YMF / AMF / ZMF maps per component over time, SGTRAP, SOLID_CALCITE.",
+          "25 x 1 x 3 cross-section, 10 components + water", 120}, exUcgCo2},
+        {{"ecbm", "Thermal core: CO2-ECBM (competitive Langmuir sorption, C12)", ExampleLevel::Advanced,
+          "Coal seam: one year of dewatering / CH4 desorption, then four years of CO2 injection displacing sorbed methane.",
+          "SORB (Langmuir on a shared site species) gives the extended Langmuir isotherm with van 't Hoff temperature dependence "
+          "and a sorption time constant; adsorbed gas is ~8x the free cleat gas. Results: SOLID_CH4_ADS / SOLID_CO2_ADS / "
+          "SOLID_SITES maps, CH4 rate response and the CO2 breakthrough at the producer, YMF of CO2.",
+          "11 x 11 x 1 Cartesian, 2 gases + 3 sorption solids + water", 40}, exEcbm},
+        {{"egs_edfm", "Thermal core: EGS doublet with embedded discrete fractures (C12)", ExampleLevel::Advanced,
+          "Cold water circulated for 5 years between two wells through a stimulated fracture network in 200 C granite.",
+          "EDFM: fracture cells appended to the matrix grid, f-m transmissibility 2 A k / <d>, f-f along traces and at "
+          "intersections. Barton-Bandis normal closure and irreversible Coulomb shear dilation under the in-situ stress "
+          "(FRACSTRESS) with thermo-elastic unloading. Results: TEMP cooling plume along the fractures, FRACAP aperture (mm), "
+          "FRACP / FRACT on the host cells, producer temperature (thermal drawdown).",
+          "21 x 11 x 3 Cartesian + 3 fractures, water + trace N2", 30}, exEgsEdfm},
+        {{"egs_multistage", "Thermal: multi-stage EGS doublet (FORGE-style, 5 EDFM fractures)", ExampleLevel::Advanced,
+          "Two parallel horizontal wells 150 m apart at 2.5 km in 210 C granite, connected by 5 transverse stimulated fractures.",
+          "Parametric EGS designer case (Thermal > Fractures & EGS > EGS designer): EDFM fractures with Barton-Bandis closure and \n"
+          "Coulomb hydro-shear under an anisotropic stress state; 50 C water circulated for 10 years. Results: Geothermal tab - \n"
+          "production temperature / thermal drawdown, net thermal power (MW), cumulative heat, injectivity / impedance, fracture \n"
+          "aperture and temperature evolution per fracture, cooled-volume growth; 3D: fracture planes coloured by aperture / T.",
+          "44 x 16 x 3 Cartesian (refined at the planes) + 5 fractures", 60}, exEgsMultistage},
+        {{"shale_hf", "Unconventional: shale gas, 10-stage fractured horizontal well (EDFM)", ExampleLevel::Advanced,
+          "1000 m lateral with 10 transverse propped fractures in a 500 nD shale; Langmuir adsorbed gas; 10 years at 50 bar BHP.",
+          "C15 hydraulic fractures in the black-oil grid: each HFRAC plane is cut into fracture cells (EDFM) connected to the \n"
+          "matrix, to each other and to the well. Langmuir desorption (V_L 2.8 sm3/t, P_L 55 bar) adds gas as the pressure \n"
+          "falls; fracture conductivity declines with drawdown (gamma 0.002 1/bar). Grid & rock > Hydraulic fractures shows \n"
+          "the stage designer (PKN / KGD sizing from the pump schedule). Results: gas rate decline (linear then boundary-\n"
+          "dominated flow), pressure depletion around the fractures, adsorbed vs free gas in the run log.",
+          "61 x 31 x 3 Cartesian + 10 fractures", 20}, exShaleMultistage},
+        {{"sagd_thm", "Thermal + geomechanics: SAGD heave (THM)", ExampleLevel::Advanced,
+          "SAGD with coupled linear thermo-poroelastic FEM: surface heave, effective-stress change, shear-failure index.",
+          "Fixed-stress iterative coupling (Kim-Tchelepi-Juanes): the pore volume follows the mechanics, dilation raises the "
+          "permeability. Results: Geomechanics tab - uplift history, vertical displacement / mean effective stress / failure maps.",
+          "21 x 1 x 12 + FEM padding, 2 components + water", 90}, exSagdThm},
         {{"hm", "History-matching exercise", ExampleLevel::Advanced,
           "Observed rates, water cuts and pressures from a hidden truth model - recover it with manual or automatic HM.",
           "Open the History Matching panel: the observations and four parameters are pre-loaded. Try the manual sliders "
@@ -752,7 +1652,33 @@ Case makeExample(const std::string& id) {
     throw std::runtime_error("Unknown example '" + id + "'");
 }
 
-void defaultBlackOil(Case& c, bool metric) { spe1Fluids(c, metric); sandstoneScal(c); }
+// placeholder fluids for imported decks the ResSim engine cannot model (display only; never run by the own engine)
+void placeholderFluids(Case& c, bool metric) { spe1Fluids(c, metric); }
+
+
+// public: heavy-oil thermal fluid preset (only c.thermal is replaced; values converted to the case unit system)
+void thermalPreset(Case& c, double tInitC) {
+    Case t; t.units = UnitSystem::Metric;
+    thermalHeavyOil(t, tInitC);
+    ThermalInput T = t.thermal;
+    if (c.units == UnitSystem::Field) {
+        auto tF = [](double C) { return C * 1.8 + 32; };
+        for (auto& q : T.comps) {
+            q.dref *= 0.0624279606; q.cref /= 14.5037738; q.thermex1 /= 1.8;
+            q.specha /= 4.1868; q.spechb /= 4.1868 * 1.8; q.spechg /= 4.1868; q.spechh /= 4.1868 * 1.8;
+            q.heatvap /= 2.326; q.heatvaps /= 2.326;
+            q.kvcr[1] *= 14.5037738; q.kvcr[2] /= 14.5037738; q.kvcr[3] *= 1.8; q.kvcr[4] *= 1.8;
+            q.pcrit *= 14.5037738; q.tcrit = q.tcrit >= 1e4 ? q.tcrit : q.tcrit * 1.8;
+        }
+        for (auto& r : T.oilViscT) r[0] = tF(r[0]);
+        for (auto& r : T.gasViscT) r[0] = tF(r[0]);
+        T.stdT = 60; T.stdP = 14.696;
+        for (double& v : T.heatcr) v /= 67.0661;
+        for (double& v : T.thconr) v /= 6.2306;
+        T.obCv /= 67.0661; T.obK /= 6.2306;
+        for (double& v : T.tempi) v = tF(v);
+    }
+    c.thermal = T;
+}
 
 } // namespace ressim
-

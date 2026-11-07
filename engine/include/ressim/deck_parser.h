@@ -103,7 +103,7 @@ std::string keywordBodyText(const Keyword& k);
 enum class Tok : uint8_t { Space, Comment, Keyword, KeywordUnknown, Section, Number, String, Default, Slash, Text, RessimExt };
 struct TokSpan { int begin, end; Tok kind; };
 // 'state' carries multi-line context (TITLE line, ACTIONX/PYINPUT blocks) between consecutive calls.
-struct LineState { int raw = 0; std::string end; };
+struct LineState { int raw = 0; std::string end; bool closed = true; /* no record open */ };
 void classifyLine(const std::string& line, std::vector<TokSpan>& out, LineState& state);
 
 }  // namespace deck

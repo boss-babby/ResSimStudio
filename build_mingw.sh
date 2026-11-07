@@ -22,7 +22,7 @@ flags_for() {
   esac
 }
 
-SRCS="$(ls engine/src/*.cpp) $(ls app/src/*.cpp) $(ls third_party/imgui/*.cpp) $(ls third_party/imgui/backends/*.cpp) third_party/implot/implot.cpp third_party/textedit/TextEditor.cpp"
+SRCS="$(ls engine/src/*.cpp) $(ls app/src/*.cpp | grep -vE '/(main_glfw|gl_view|viewport3d_gl|geoscene3d_gl|figure_png_vg|gpu_compute_stub)\.cpp$') $(ls third_party/imgui/*.cpp) third_party/imgui/backends/imgui_impl_win32.cpp third_party/imgui/backends/imgui_impl_dx11.cpp third_party/implot/implot.cpp third_party/textedit/TextEditor.cpp"
 fail=0
 compile() {
   local f=$1 o=$OUT/obj/$(echo $1 | tr '/' '_' | sed 's/\.cpp$/.o/')
@@ -57,5 +57,21 @@ if [ "${TESTS:-1}" = 1 ]; then
   echo "  LINK $OUT/ressim_tests.exe"
   $CXX $BASE -O2 -fopenmp tests/run_tests.cpp $OUT/obj/engine_src_*.o -o $OUT/ressim_tests.exe -static -s || echo "tests link failed"
 fi
-ls -la $OUT/*.exe
+# C16: console engine front end (single runs, MPI distributed batches via run-time loaded msmpi.dll)
+if [ ! -f $OUT/ResSimCLI.exe ] || [ -n "$(find tools/ressim_cli.cpp $OUT/obj -newer $OUT/ResSimCLI.exe -name 'engine_src_*.o' -o -newer $OUT/ResSimCLI.exe -name 'ressim_cli.cpp' | head -1)" ]; then
+  echo "  LINK $OUT/ResSimCLI.exe"
+  $CXX $BASE -O2 -fopenmp tools/ressim_cli.cpp $OUT/obj/engine_src_*.o -o $OUT/ResSimCLI.exe -static -s || echo "CLI link failed"
+fi
+# C32 ResGeo.exe: standalone geomodelling launcher (opens ResSimStudio.exe --geo)
+if [ ! -f $OUT/ResGeo.exe ] || [ tools/resgeo_launcher.cpp -nt $OUT/ResGeo.exe ]; then
+  echo "  LINK $OUT/ResGeo.exe"
+  $CXX -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN tools/resgeo_launcher.cpp -o $OUT/ResGeo.exe -mwindows -static -s || echo "ResGeo link failed"
+fi
+# C33 ressim.dll: C API for the Python package (ctypes), MATLAB, Julia, C#, Excel ... (static runtime, no other DLLs)
+if [ ! -f $OUT/ressim.dll ] || [ -n "$(find $OUT/obj -newer $OUT/ressim.dll -name 'engine_src_*.o' | head -1)" ]; then
+  echo "  LINK $OUT/ressim.dll"
+  $CXX -shared -o $OUT/ressim.dll $OUT/obj/engine_src_*.o -static -static-libgcc -static-libstdc++ -fopenmp -s \
+    -Wl,--out-implib,$OUT/libressim.dll.a || echo "DLL link failed"
+fi
+ls -la $OUT/*.exe $OUT/*.dll 2>/dev/null
 echo "BUILD OK"

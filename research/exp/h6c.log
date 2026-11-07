@@ -1,0 +1,38 @@
+dropped unparseable names (i): 4
+
+== i_triggered_fixed  n=192  assigned {'HF1': 49, 'HF2': 101, 'HF3': 17, 'HF4': 1, 'HF5': 0, 'HF6': 24}
+  AIC K6_V_qbeta 71.5  K7_V_cumV 72.2  K8_V_q_cumV 73.2  K2 77.7  K3 83.2  K1 134.5  K5_duration 159.4  K0_const 177.6  K4 322.9
+  K1 Asig 1.555 MPa | K7 gamma 0.40 CI [0.20000000000000018, 0.6000000000000001] | K6 beta CI [0.3500000000000001, 1.0500000000000003] | K8 beta CI [-0.45, 1.3]
+  H6b kernel K2 HF3/AG 0.247 t -0.99 5%-bound 0.036 significant False sigma 1.15
+  H1h post fraction obs 0.287 (n 150) vs Dieterich 0.490
+  boot dAIC(K1-best23) ['10.8', '47.0', '94.0']  P(>=10) 0.976 | dAIC(K2-K3) ['-10.2', '-4.2', '0.7'] | LOTO HF3 ratio {'HF1': 0.187, 'HF2': 0.325, 'HF4': 0.247, 'HF6': 0.247}
+
+== ii_continuous_all  n=19756  assigned {'HF1': 6342, 'HF2': 6083, 'HF3': 2866, 'HF4': 527, 'HF5': 0, 'HF6': 3870}
+  AIC K7_V_cumV 976.2  K8_V_q_cumV 978.2  K6_V_qbeta 1014.2  K2 1296.6  K3 1308.7  K5_duration 2400.4  K1 3441.5  K0_const 4859.4  K4 16088.0
+  K1 Asig 2.795 MPa | K7 gamma -0.20 CI [-0.19999999999999996, -0.1499999999999999] | K6 beta CI [-0.34999999999999987, -0.2999999999999998] | K8 beta CI [-0.05, -0.05]
+  H6b kernel K2 HF3/AG 0.471 t -1.92 5%-bound 0.398 significant False sigma 0.32
+  H1h post fraction obs 0.188 (n 12425) vs Dieterich 0.665
+  boot dAIC(K1-best23) ['-489.0', '1896.2', '5072.2']  P(>=10) 0.875 | dAIC(K2-K3) ['-236.5', '-24.2', '174.2'] | LOTO HF3 ratio {'HF1': 0.525, 'HF2': 0.423, 'HF4': 0.471, 'HF6': 0.471}
+  PREDICTIONS P-a True P-b True
+
+== iii_continuous_M2.5  n=2322  assigned {'HF1': 529, 'HF2': 936, 'HF3': 279, 'HF4': 7, 'HF5': 0, 'HF6': 564}
+  AIC K6_V_qbeta 207.0  K8_V_q_cumV 208.8  K7_V_cumV 228.8  K2 246.4  K3 299.4  K1 791.4  K5_duration 982.4  K0_const 1198.9  K4 2230.0
+  K1 Asig 1.584 MPa | K7 gamma 0.25 CI [0.25, 0.30000000000000004] | K6 beta CI [0.4500000000000002, 0.6499999999999999] | K8 beta CI [0.4, 0.9]
+  H6b kernel K2 HF3/AG 0.405 t -0.55 5%-bound 0.020 significant False sigma 1.35
+  H1h post fraction obs 0.143 (n 1465) vs Dieterich 0.500
+  boot dAIC(K1-best23) ['70.1', '410.3', '981.4']  P(>=10) 1.000 | dAIC(K2-K3) ['-84.4', '-46.8', '2.2'] | LOTO HF3 ratio {'HF1': 0.332, 'HF2': 0.494, 'HF4': 0.405, 'HF6': 0.405}
+  PREDICTIONS P-a True P-b True P-c True P-d True
+
+== x_continuous_M2.15  n=4146  assigned {'HF1': 822, 'HF2': 1542, 'HF3': 576, 'HF4': 78, 'HF5': 0, 'HF6': 1119}
+  AIC K2 234.9  K8_V_q_cumV 250.9  K6_V_qbeta 254.4  K7_V_cumV 263.2  K3 266.4  K1 899.7  K5_duration 981.4  K0_const 1407.4  K4 3398.6
+  K1 Asig 1.841 MPa | K7 gamma 0.05 CI [0.050000000000000044, 0.050000000000000044] | K6 beta CI [0.10000000000000009, 0.25] | K8 beta CI [0.2, 0.55]
+  H6b kernel K2 HF3/AG 0.522 t -1.20 5%-bound 0.279 significant False sigma 0.44
+  H1h post fraction obs 0.179 (n 2364) vs Dieterich 0.548
+  boot dAIC(K1-best23) ['71.2', '532.6', '1211.4']  P(>=10) 0.995 | dAIC(K2-K3) ['-73.2', '-23.0', '13.7'] | LOTO HF3 ratio {'HF1': 0.416, 'HF2': 0.656, 'HF4': 0.522, 'HF6': 0.522}
+
+== x_continuous_M3.0  n=192  assigned {'HF1': 37, 'HF2': 99, 'HF3': 7, 'HF4': 0, 'HF5': 0, 'HF6': 48}
+  AIC K6_V_qbeta 53.0  K8_V_q_cumV 55.0  K7_V_cumV 62.1  K2 102.2  K3 113.7  K1 159.3  K5_duration 225.0  K0_const 226.3  K4 351.8
+  K1 Asig 1.246 MPa | K7 gamma 1.00 CI [0.7000000000000002, 1.35] | K6 beta CI [1.3000000000000003, 2.3000000000000003] | K8 beta CI [0.7, 3.0]
+  H6b kernel K2 HF3/AG 0.118 t -0.13 5%-bound 0.000 significant False sigma 13.07
+  H1h post fraction obs 0.250 (n 136) vs Dieterich 0.396
+  boot dAIC(K1-best23) ['7.5', '40.8', '107.2']  P(>=10) 0.957 | dAIC(K2-K3) ['-16.8', '-9.9', '-0.3'] | LOTO HF3 ratio {'HF1': 0.079, 'HF2': 0.177, 'HF4': 0.118, 'HF6': 0.118}

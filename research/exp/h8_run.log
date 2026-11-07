@@ -1,0 +1,24 @@
+Mc -1.45 (max curvature -1.65 + 0.2), N(M>=Mc) 2846, b 1.387 +- 0.026, ML max 1.09
+E1 kernel: RMSE train 93.2 bar, test 81.8 bar = 11.4% of range 716 bar -> WEAK
+   kernel a_j (bar per m3/min): [  89.3    0.   419.4   56.1    0.     0.  1284.8  270.4    0.     0. ]  c1 0.0  c2 0.0
+E2 fit: P* 72.90 bar, t_a 7798 h, tau_d 10.0 h, r 0.385/h; corr(cum) 0.9984; N 2846 vs 2846; tail 325 vs 351 -> PASS
+E3 hold-out: shut-in 1742 vs obs 2521 (-31%), end 1776 vs 2846 (-38%), SI baseline at shut-in 1470 (-42%) -> FAIL
+E9 transfer (2018 P*, t_a, tau_d; r refit): corr(cum) 0.9854, shut-in error -23%, tail 325 vs 910 -> PASS
+E4 design (full window): actual 2834, constant 2286, optimal 2078 (-9.1% vs constant, -26.7% vs actual; no WHP cap 2072); Pi 3.43, Pi-law gain 15.6%
+E4b with stage-change pauses: constant 3816, optimal 2747; actual is -25.7% vs constant
+E7 full                : Pi 3.43: optimal vs constant -9.4%, actual vs constant +24.0%
+E7 fast_only(T<=30h)   : Pi 3.43: optimal vs constant -2.7%, actual vs constant +213.5%
+E7 slow_only(T>=100h)  : Pi 3.43: optimal vs constant -14.8%, actual vs constant +15.7%
+E8 T_k      1 h (T_k/T_inj  0.0026): optimal vs constant -  0.0%, actual vs constant +535.0%
+E8 T_k      3 h (T_k/T_inj  0.0077): optimal vs constant -  0.4%, actual vs constant +432.9%
+E8 T_k     10 h (T_k/T_inj  0.0258): optimal vs constant -  2.4%, actual vs constant +217.9%
+E8 T_k     30 h (T_k/T_inj  0.0775): optimal vs constant -  7.6%, actual vs constant  +56.4%
+E8 T_k    100 h (T_k/T_inj  0.2582): optimal vs constant - 14.0%, actual vs constant  +18.5%
+E8 T_k    300 h (T_k/T_inj  0.7745): optimal vs constant - 11.5%, actual vs constant   +5.5%
+E8 T_k   1000 h (T_k/T_inj  2.5818): optimal vs constant -  5.8%, actual vs constant   +1.2%
+E8 T_k   3000 h (T_k/T_inj  7.7453): optimal vs constant -  3.2%, actual vs constant   -0.1%
+E5 window: {'actual': (2486, 2834), 'constant': (1960, 2286), 'opt_full': (1689, 2078), 'opt_shutin': (1645, 2113)}  rank@shut-in ['opt_shutin', 'opt_full', 'constant', 'actual']  rank@full ['opt_full', 'opt_shutin', 'constant', 'actual']
+E6 robustness: hold-out design evaluated with full params 6723 -> keeps -2133% of the gain -> FAIL
+D3 b vs Mc: {'-0.95': (545, 1.36), '-0.5': (129, 1.18), '0.0': (33, 1.24), '0.5': (8, None), '1.0': (2, None)} ; unbounded G-R expects 0.0 events >= 2.0 (observed 0, P(0) 0.955), 0.2 >= 1.5 (observed 0)
+D3: b 1.39; P(ML>=2): actual 0.045, constant 0.037, optimal 0.033; max volume at the actual hazard 3412 m3 (1.18x)
+done in 6 s

@@ -144,13 +144,6 @@ public:
         while (e < code.size() && !std::isspace((unsigned char)code[e])) ++e;
         name = code.substr(a, e - a);
         size_t t = e; while (t < code.size() && std::isspace((unsigned char)code[t])) ++t;
-        if (t < code.size()) {
-            // ECLIPSE ignores text after a keyword. Accept it for section headers ("SOLUTION =====") and for
-            // decorations starting with '=' ; otherwise the line is data.
-            bool isSection = false;
-            for (auto* sn : kSections) if (name == sn) isSection = true;
-            if (!(a == 0 && (isSection || code[t] == '='))) return false;
-        }
         spec = nullptr;
         if (!name.empty() && std::isupper((unsigned char)name[0])) {
             spec = findKeyword(name);
@@ -160,8 +153,46 @@ public:
                 if (bit < 0 || !(spec->sections & (1u << bit))) spec = nullptr;
             }
         }
+        if (t < code.size()) {
+            // ECLIPSE reads a keyword from columns 1-8 and ignores the rest of the line. Accept trailing text for
+            // section headers ("SOLUTION =====") and '=' decorations, and - for known keywords in column 1 - when
+            // no record is open (the previous token closed a record or was a keyword without data). Old decks
+            // carry generator stamps there, e.g. "PVDG       2 TABLES   20 P NODES ...   FIELD   12:13  2 JAN 90".
+            // Inside an open record (e.g. RPTSOL mnemonics "PRESSURE SWAT ...") such a line stays data.
+            bool isSection = false;
+            for (auto* sn : kSections) if (name == sn) isSection = true;
+            bool ok = a == 0 && (isSection || code[t] == '=');
+            if (!ok && a == 0 && spec && name.size() <= 8 && (!arrayMode || toks.empty() || curKw < 0 || toks[curKw].arrayClosed) && recordsClosed()) ok = true;
+            // ...but not inside a "records until an empty record" list that is still open when the line itself is a
+            // complete record: EQUALS / COPY / ADD records start with an array name ("SWL 0.05 1 46 1 112 2 2 /")
+            if (ok && !isSection && code[t] != '=' && slashListOpen() && code.find('/', t) != std::string::npos) ok = false;
+            if (!ok) { spec = nullptr; return false; }
+        }
         if (spec) return true;
         return a == 0 && keywordLike(name);          // unknown keywords must start in column 1
+    }
+
+    // true if a new keyword may start here: no tokens yet, the last token closed a record, or the last token is a
+    // keyword that takes no data
+    bool slashListOpen() const {
+        if (curKw < 0 || toks.empty() || size_t(curKw) >= toks.size()) return false;
+        const KeywordSpec* ks = findKeyword(toks[size_t(curKw)].s);
+        if (!ks || ks->kind != KwSize::Slash) return false;
+        const size_t n = toks.size();
+        if (n - 1 == size_t(curKw)) return true;                         // keyword without records yet
+        if (toks[n - 1].t != Tk::Slash) return true;                     // record still open
+        return !(toks[n - 2].t == Tk::Slash || n - 2 == size_t(curKw));  // empty record terminates the list
+    }
+    bool recordsClosed() const {
+        if (toks.empty()) return true;
+        const Tk& b = toks.back();
+        if (b.t == Tk::Slash) return true;
+        if (b.t == Tk::Kw) {
+            if (b.array >= 0) return b.arrayClosed;          // array keyword terminated by '/'
+            const KeywordSpec* ks = findKeyword(b.s);
+            return ks && ks->kind == KwSize::None;
+        }
+        return false;
     }
 
     std::string resolve(std::string f, const std::string& dir) {
@@ -201,18 +232,21 @@ public:
     void splitData(const std::string& l, int fi, int ln) {
         size_t i = 0;
         while (i < l.size()) {
-            if (std::isspace((unsigned char)l[i])) { ++i; continue; }
+            // ',' separates items like blanks (old fixed-format decks: 'LU1     ','ONE     ', 14,  8,7300.00,'OIL')
+            if (std::isspace((unsigned char)l[i]) || l[i] == ',') { ++i; continue; }
             Tk t; t.file = fi; t.line = ln;
             if (l[i] == '\'' || l[i] == '"') {
                 const char q = l[i];
                 size_t e = l.find(q, i + 1);
                 if (e == std::string::npos) { err(Level::Warning, fi, ln, "", "unterminated quote"); e = l.size(); }
                 t.s = l.substr(i + 1, e - i - 1); t.quoted = true;
+                // names padded to 8 characters ('I*      ', 'THP ') - trailing blanks are not significant
+                while (!t.s.empty() && t.s.back() == ' ') t.s.pop_back();
                 toks.push_back(t); i = e + 1; continue;
             }
             if (l[i] == '/') { t.t = Tk::Slash; toks.push_back(t); afterSlash(); return; }   // rest of the line is a comment
             size_t e = i;
-            while (e < l.size() && !std::isspace((unsigned char)l[e]) && l[e] != '/' && l[e] != '\'' && l[e] != '"') ++e;
+            while (e < l.size() && !std::isspace((unsigned char)l[e]) && l[e] != '/' && l[e] != '\'' && l[e] != '"' && l[e] != ',') ++e;
             t.s = l.substr(i, e - i);
             toks.push_back(t); i = e;
         }
@@ -223,10 +257,10 @@ public:
         std::vector<double>& a = arrays[toks[curKw].array];
         size_t i = 0;
         while (i < l.size()) {
-            if (std::isspace((unsigned char)l[i])) { ++i; continue; }
+            if (std::isspace((unsigned char)l[i]) || l[i] == ',') { ++i; continue; }
             if (l[i] == '/') { toks[curKw].arrayClosed = true; return true; }
             size_t e = i;
-            while (e < l.size() && !std::isspace((unsigned char)l[e]) && l[e] != '/') ++e;
+            while (e < l.size() && !std::isspace((unsigned char)l[e]) && l[e] != '/' && l[e] != ',') ++e;
             std::string w = l.substr(i, e - i);
             i = e;
             if (!w.empty() && (w[0] == '\'' || w[0] == '"')) w = w.substr(1, w.size() > 1 ? w.size() - 2 : 0);
@@ -305,6 +339,14 @@ public:
                     rawMode = 0; rawText.clear(); continue;
                 }
                 rawText += line; rawText += '\n';
+                continue;
+            }
+            if (line.rfind("-- RESSIM+", 0) == 0) {   // continuation of a long '-- RESSIM:' line (see wrapLongLines)
+                if (!toks.empty() && toks.back().t == Tk::Slash && curKw >= 0 && toks[size_t(curKw)].s == "__RESSIM") {
+                    const Tk sl = toks.back(); toks.pop_back();
+                    splitData(line.substr(10), fi, ln);
+                    toks.push_back(sl);
+                }
                 continue;
             }
             if (line.rfind("-- RESSIM:", 0) == 0) {
@@ -502,7 +544,7 @@ public:
                 case KwSize::FromKw: readN(sizeFrom(*spec, K.name), "records"); break;
                 case KwSize::Slash:
                     while (true) {
-                        if (done() || (cur().t == Tk::Kw && cur().known)) { D.message(Level::Warning, K, "list not terminated by an empty '/' record"); break; }
+                        if (done() || (cur().t == Tk::Kw && cur().known)) { D.message(done() ? Level::Warning : Level::Info, K, "list not terminated by an empty '/' record (accepted: the next keyword follows)"); break; }
                         const bool ok = record(r);
                         if (ok && r.items.empty()) break;
                         K.records.push_back(r);
@@ -610,19 +652,23 @@ void classifyLine(const std::string& line, std::vector<TokSpan>& out, LineState&
         out.push_back({0, n, Tok::Text});
         return;
     }
-    if (line.rfind("-- RESSIM:", 0) == 0) { out.push_back({0, n, Tok::RessimExt}); return; }
+    if (line.rfind("-- RESSIM:", 0) == 0 || line.rfind("-- RESSIM+", 0) == 0) { out.push_back({0, n, Tok::RessimExt}); return; }
     // keyword line?
     {
         int a = 0; while (a < n && line[a] == ' ') ++a;
         int e = a; while (e < n && !std::isspace((unsigned char)line[e])) ++e;
         int r = e; while (r < n && std::isspace((unsigned char)line[r])) ++r;
         const bool restComment = r >= n || (r + 1 < n && line[r] == '-' && line[r + 1] == '-');
-        if (e > a && restComment && std::isupper((unsigned char)line[a])) {
+        // trailing text after a column-1 keyword is ignored by ECLIPSE (generator stamps in old decks)
+        const bool stamped = !restComment && a == 0 && e - a <= 8 && st.closed;
+        if (e > a && (restComment || stamped) && std::isupper((unsigned char)line[a])) {
             const std::string w = line.substr(a, e - a);
             const KeywordSpec* s = findKeyword(w);
             bool section = false;
             for (auto* sn : kSections) if (w == sn) section = true;
-            if (s || (a == 0 && keywordLike(w))) {
+            const bool accept = restComment ? (s || (a == 0 && keywordLike(w) && st.closed)) : (s || section);
+            if (accept) {
+                st.closed = section || (s && s->kind == KwSize::None);
                 if (a > 0) out.push_back({0, a, Tok::Space});
                 out.push_back({a, e, section ? Tok::Section : (s ? Tok::Keyword : Tok::KeywordUnknown)});
                 if (r < n) out.push_back({r, n, Tok::Comment});
@@ -630,6 +676,14 @@ void classifyLine(const std::string& line, std::vector<TokSpan>& out, LineState&
                 if (s && (s->kind == KwSize::Code || s->kind == KwSize::Action)) { st.raw = 2; st.end = (s->end && *s->end) ? s->end : "ENDACTIO"; }
                 return;
             }
+        }
+    }
+    {   // record state for the next line
+        std::string c = trim(stripComment(line));
+        if (!c.empty()) {
+            bool sl = false; char q = 0;
+            for (char ch : c) { if (q) { if (ch == q) q = 0; continue; } if (ch == '\'' || ch == '"') q = ch; else if (ch == '/') { sl = true; break; } }
+            st.closed = sl;
         }
     }
     int i = 0;

@@ -1,0 +1,27 @@
+CONST u=1: RSF objective 2.35775e+15 (mean moment N m)
+TRAIN  0 [1.23 1.68 0.03 1.07] RSF 3.31532e+15
+TRAIN  1 [1.00 1.25 0.80 0.95] RSF 2.35779e+15
+TRAIN  2 [1.16 1.52 1.11 0.21] RSF 3.2815e+15
+TRAIN  3 [0.21 1.47 0.86 1.46] RSF 3.51122e+15
+TRAIN  4 [0.97 0.87 0.98 1.18] RSF 2.40937e+15
+TRAIN  5 [1.08 2.40 0.30 0.23] RSF 4.1233e+15
+TRAIN  6 [0.16 1.16 0.49 2.19] RSF 4.09725e+15
+TRAIN  7 [1.30 0.89 0.77 1.05] RSF 2.26482e+15
+TRAIN  8 [0.84 1.15 0.27 1.74] RSF 3.59734e+15
+TRAIN  9 [1.51 1.44 0.61 0.45] RSF 3.1135e+15
+TRAIN 10 [0.70 1.01 1.69 0.60] RSF 3.45658e+15
+TRAIN 11 [1.71 0.70 0.07 1.53] RSF 3.12581e+15
+GP-EI 13 ell 0.631 noise 1e-06 | x [1.18 0.99 0.84 0.98] EI 0.0145 pred 2.238e+15 (+- 0.02 in log) RSF 2.3185e+15 | best 2.26482e+15
+GP-EI 14 ell 0.794 noise 0.01 | x [1.45 0.55 0.92 1.08] EI 0.00313 pred 2.458e+15 (+- 0.06 in log) RSF 2.2193e+15 | best 2.2193e+15
+GP-EI 15 ell 0.794 noise 0.01 | x [1.53 0.24 0.92 1.31] EI 0.00627 pred 2.356e+15 (+- 0.06 in log) RSF 2.48704e+15 | best 2.2193e+15
+GP-EI 16 ell 0.794 noise 0.01 | x [1.43 0.65 0.99 0.93] EI 0.00679 pred 2.25e+15 (+- 0.03 in log) RSF 2.2212e+15 | best 2.2193e+15
+GP-EI 17 ell 0.794 noise 0.01 | x [1.65 0.56 0.86 0.92] EI 0.00527 pred 2.283e+15 (+- 0.04 in log) RSF 3.1364e+15 | best 2.2193e+15
+GP-EI 18 ell 0.501 noise 0.1 | x [1.23 0.61 1.02 1.14] EI 0.0428 pred 2.151e+15 (+- 0.06 in log) RSF 2.29512e+15 | best 2.2193e+15
+GP-EI 19 ell 0.631 noise 0.1 | x [1.20 0.69 0.96 1.15] EI 0.0117 pred 2.232e+15 (+- 0.04 in log) RSF 2.30929e+15 | best 2.2193e+15
+GP-EI 20 ell 0.631 noise 0.1 | x [1.19 0.78 1.04 0.99] EI 0.0073 pred 2.27e+15 (+- 0.04 in log) RSF 2.31496e+15 | best 2.2193e+15
+GP-EI 21 ell 0.631 noise 0.1 | x [1.23 0.69 0.85 1.22] EI 0.00606 pred 2.28e+15 (+- 0.04 in log) RSF 2.45718e+15 | best 2.2193e+15
+GP-EI 22 ell 0.316 noise 1e-06 | x [1.34 0.66 0.97 1.03] EI 0.0525 pred 2.106e+15 (+- 0.02 in log) RSF 2.24441e+15 | best 2.2193e+15
+GP-EI 23 ell 0.631 noise 0.1 | x [1.25 0.35 1.29 1.11] EI 0.00629 pred 2.436e+15 (+- 0.09 in log) RSF 2.2886e+15 | best 2.2193e+15
+GP-EI 24 ell 0.631 noise 0.1 | x [1.21 0.66 1.12 1.01] EI 0.0053 pred 2.264e+15 (+- 0.03 in log) RSF 2.30416e+15 | best 2.2193e+15
+SUMMARY H11 const 2.35775e+15 | GP-EI best 2.2193e+15 at [1.45 0.55 0.92 1.08] (24 RSF evaluations incl. 12 training) | ES median best (H9b) 2.21503e+15 | ratio 1.002 | vs const 0.941 | RSF 193 s
+VERDICT H11 SUPPORTED (<= 1.05)

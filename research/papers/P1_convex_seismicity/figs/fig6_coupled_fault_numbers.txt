@@ -1,0 +1,18 @@
+faces 100
+max_dCFS_two 14.603
+max_dCFS_one 11.150
+react_100d_two 43.0
+react_100d_one 43.0
+expected_shutin_two 478.00
+expected_end_two 479.20
+expected_end_one 351.88
+post_shutin_fraction_two 0.003
+catalogue_dieterich 483
+catalogue_rsf 0
+mw_max 2.27
+mw_cap 2.69
+dp_across_two 43.65
+dp_across_one 47.57
+two_way_updates 15
+critical_t0 0
+rsf layer 3 faces 20 hstar 920.4 Lb 160.6 dx 6.25 events 0 err 

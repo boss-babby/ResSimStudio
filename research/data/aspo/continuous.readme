@@ -1,0 +1,10 @@
+CATALOG FILEFORMAT
+(semi-colon seperated)
+
+event_name,origin_time;x;y;depth
+
+event_name...		derived from origin time YYYYMMDDHHMMSS.MICROSECONDS (UTC)
+origin_time...      YYYY-MM-DD_HH:MM:SS.MICROSECONDS(6 digits) (UTC)
+x...                aspo96 system (m)
+y...                aspo96 system (m)
+depth...            aspo96 system (m)

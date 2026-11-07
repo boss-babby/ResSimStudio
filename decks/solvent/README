@@ -1,0 +1,10 @@
+Solvent decks (C35, ECLIPSE / OPM SOLVENT option)
+  SPE1CASE2_SOLVENT.DATA           SPE1 case 2 with 10 years of solvent injection (WSOLVENT 1); based on opm-tests
+                                   spe1_solvent (OPM/opm-tests, ODbL). Solvent balance, restart and z = 0 checks (-solv).
+  SPE1CASE2_SOLVENT_FOAM.DATA      opm-tests spe1_solvent SOLVENT + FOAM (FOAMOPTS SOLVENT). OPM Flow reference in opm-ref/.
+                                   ResSim engine vs OPM Flow: relRMS FGOR 0.4 %, WBHP:INJ 0.9 %, WBHP:PROD 0.6 %.
+  SPE1CASE2_GASWATER_SOLVENT.DATA  opm-tests gas-water solvent case (no oil phase): runs with the OPM Flow engine only
+                                   (the ResSim black-oil engine needs an oil phase). OPM reference in opm-ref/.
+Run:  ResSimCLI --compare opm-ref/SPE1CASE2_SOLVENT_FOAM.SMSPEC SPE1CASE2_SOLVENT_FOAM.DATA   (or Run > Compare)
+Model: immiscible SSFN solvent model (ENGINES_AND_MATH 6.29). MISC / TLMIXPAR (miscible, Todd-Longstaff) are kept
+verbatim for OPM Flow; the ResSim engine writes a note and runs the immiscible model.

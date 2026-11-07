@@ -1,0 +1,86 @@
+-- C29 example: near-well salt precipitation by dry-out (TOUGH3 EWASG-type physics in the black-oil engine).
+-- A brine aquifer (200 kg/m3 NaCl, 150 C) receives dry gas at the left end; a water producer at the right end keeps the
+-- pressure. Gas entering the water-bearing cells evaporates water (vapour capacity from the saturation pressure at 150 C),
+-- the brine concentrates above the solubility (317 kg/m3) and halite precipitates; permeability follows the Verma & Pruess
+-- tubes-in-series model (phiR 0.8, Gamma 0.8). Results: 3D arrays SSALT (solid fraction of the pore volume) and KSALT
+-- (permeability factor), injector BHP rising as the near-well permeability drops. OPM Flow ignores the RESSIM SALT line
+-- (it then runs the same case without salt).
+-- Expected: the injector cell dries out by day ~70 (Sw 0.002), solid salt 2.8 % of the pore volume, permeability factor 0.76;
+-- about 32 m3 of water evaporated in total. Runs in under a second.
+RUNSPEC
+TITLE
+Salt precipitation by dry-out around a gas injector (C29)
+DIMENS
+ 40 1 1 /
+OIL
+WATER
+GAS
+METRIC
+TABDIMS
+ 1 1 20 20 /
+WELLDIMS
+ 2 1 1 2 /
+START
+ 1 JAN 2025 /
+GRID
+DX
+ 10*1 30*5 /
+DY
+ 40*50 /
+DZ
+ 40*10 /
+TOPS
+ 40*1500 /
+PORO
+ 40*0.2 /
+PERMX
+ 40*200 /
+PERMY
+ 40*200 /
+PERMZ
+ 40*20 /
+-- RESSIM: SALT 200 317 2165 0.8 0.8 150 0
+PROPS
+PVDO
+ 100 1.10 1.0
+ 300 1.08 1.1 /
+PVTW
+ 150 1.0 4e-5 0.4 0 /
+PVDG
+ 50  0.0240 0.015
+ 150 0.0080 0.019
+ 300 0.0042 0.026 /
+DENSITY
+ 800 1100 0.8 /
+ROCK
+ 150 4e-5 /
+SWOF
+ 0.2 0 1 0
+ 0.6 0.25 0.1 0
+ 1.0 1 0 0 /
+SGOF
+ 0    0    1 0
+ 0.2  0.05 0.4 0
+ 0.5  0.35 0.05 0
+ 0.8  0.8  0 0 /
+SOLUTION
+EQUIL
+ 1505 150 1000 0 900 0 /
+SCHEDULE
+WELSPECS
+ INJ G 1 1 1505 GAS /
+ PRD G 40 1 1505 WATER /
+/
+COMPDAT
+ INJ 1 1 1 1 OPEN 1* 1* 0.15 /
+ PRD 40 1 1 1 OPEN 1* 1* 0.15 /
+/
+WCONINJE
+ INJ GAS OPEN RATE 50000 1* 400 /
+/
+WCONPROD
+ PRD OPEN BHP 5* 150 /
+/
+TSTEP
+ 10*3 16*20 /
+END
